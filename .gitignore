@@ -1,0 +1,66 @@
+# Learn more https://docs.github.com/en/get-started/getting-started-with-git/ignoring-files
+
+# dependencies
+node_modules/
+.pnpm-store/
+
+# Expo
+.expo/
+dist/
+web-build/
+expo-env.d.ts
+
+# Native
+.kotlin/
+*.orig.*
+*.jks
+*.p8
+*.p12
+*.key
+*.mobileprovision
+
+# Metro
+.metro-health-check*
+
+# debug
+npm-debug.*
+yarn-debug.*
+yarn-error.*
+
+# macOS
+.DS_Store
+*.pem
+
+# local env files
+.env*
+!.env.example
+!.env.*.example
+/sprout-server
+/.release/
+
+# Local and Server runtime data; new installations create their own empty storage.
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+/objects/
+/data/
+/server/objects/
+/server/data/
+/server/sprout-server
+/server/sprout-server.next
+/server/sprout-server.previous
+
+# typescript
+*.tsbuildinfo
+.tmp/
+__pycache__/
+
+example
+
+# generated native folders
+/ios
+/android

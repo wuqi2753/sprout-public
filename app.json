@@ -1,0 +1,49 @@
+{
+  "expo": {
+    "name": "Sprout",
+    "slug": "sprout",
+    "version": "1.1.1",
+    "orientation": "default",
+    "icon": "./assets/images/sprout-icon-cartoon-adaptive.png",
+    "scheme": "nativeinstant",
+    "userInterfaceStyle": "automatic",
+    "ios": {
+      "icon": "./assets/images/sprout-icon-cartoon-adaptive.png",
+      "buildNumber": "3"
+    },
+    "android": {
+      "package": "com.nativeinstant.app",
+      "versionCode": 3,
+      "adaptiveIcon": {
+        "backgroundColor": "#F8F8F6",
+        "foregroundImage": "./assets/images/sprout-icon-cartoon-adaptive.png"
+      },
+      "predictiveBackGestureEnabled": false
+    },
+    "web": {
+      "output": "static",
+      "favicon": "./assets/images/sprout-icon-cartoon-adaptive.png"
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-image-picker",
+        {
+          "photosPermission": "允许 Sprout 访问照片，以便为记录添加图片。"
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "backgroundColor": "#F8F8F6",
+          "image": "./assets/images/sprout-icon-cartoon-adaptive.png",
+          "imageWidth": 76
+        }
+      ]
+    ],
+    "experiments": {
+      "typedRoutes": true,
+      "reactCompiler": true
+    }
+  }
+}

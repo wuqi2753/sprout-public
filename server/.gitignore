@@ -1,0 +1,20 @@
+/.build/
+/.gocache/
+/.gotmp/
+
+# Runtime state and configuration, never source code.
+.env*
+!.env.example
+!.env.*.example
+*.db
+*.db-*
+*.sqlite
+*.sqlite-*
+*.sqlite3
+*.sqlite3-*
+*.log
+/objects/
+/data/
+/sprout-server
+/sprout-server.next
+/sprout-server.previous
