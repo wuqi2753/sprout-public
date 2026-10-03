@@ -359,4 +359,3 @@ sed -n 's/^SPROUT_API_KEY=//p' .env
 修改 `.env` 后执行 `sudo systemctl restart sprout`；移动项目目录后更新 `ExecStart` 中的程序与配置路径，再执行 `daemon-reload` 和重启。
 
 更新、备份与排错见 [Server README](server/README.md)。
-
