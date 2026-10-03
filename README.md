@@ -5,13 +5,13 @@
 
 ## Android 安装包
 
-在仓库的 Releases 下载 `sprout-1.1.2-android.apk`，支持 Android 7.0+、ARM64 / ARMv7 手机。正式版内置运行代码，不需要 localhost 或开发机；首次启动后填写自己的 Server 地址与 API Key。
+在 [Releases](https://github.com/wuqi2753/sprout-public/releases/latest) 下载 [sprout-1.1.2-android.apk](https://github.com/wuqi2753/sprout-public/releases/download/v1.1.2/sprout-1.1.2-android.apk)，支持 Android 7.0+、ARM64 / ARMv7 手机。正式版内置运行代码，不需要 localhost 或开发机；首次启动后填写自己的 Server 地址与 API Key。
 
 正式版与原调试版签名不同，不能直接覆盖安装。已有调试版记录时先保留并备份数据，不要直接卸载；后续正式版可使用同一签名正常更新。
 
 ## 云服务器部署
 
-本文适用于 Ubuntu 22.04、x86_64，域名用 `app.example.com` 举例。所有示例域名、IP 和仓库地址需替换。命令按顺序逐条执行，失败时先处理，再继续；文件内容需粘贴到指定文件，不是在终端执行。
+本文适用于 Ubuntu 22.04、x86_64，域名用 `app.example.com` 举例。示例域名和 IP 需替换为自己的服务器信息；公开仓库地址已填写，可直接使用。命令按顺序逐条执行，失败时先处理，再继续；文件内容需粘贴到指定文件，不是在终端执行。
 
 | 顺序 | 在哪里做 | 完成什么 |
 | --- | --- | --- |
@@ -55,18 +55,18 @@ go version
 
 成功示例：`go version go1.27.1 linux/amd64`（版本随官方下载更新）。若提示 `go: command not found`，检查 PATH；已有旧版或旧安装目录时，按 [Go 官方升级说明](https://go.dev/doc/install) 处理，不能向旧目录直接解压覆盖。
 
-**克隆并构建**：仓库 URL 从仓库页面 Code 复制。
+**克隆并构建**：直接使用下面的公开仓库地址，无需登录 GitHub。
 
 ```sh
 SPROUT_DIR=/opt/sprout
 sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 755 "$SPROUT_DIR"
-git clone <仓库URL> "$SPROUT_DIR"
+git clone https://github.com/wuqi2753/sprout-public.git "$SPROUT_DIR"
 cd "$SPROUT_DIR/server"
 go test ./...
 go build -o ../sprout-server .
 ```
 
-成功时测试输出 `ok sprout/server ...`，构建通常无输出。Git `Authentication failed` 表示仓库权限未通过。
+成功时测试输出 `ok sprout/server ...`，构建通常无输出。公开仓库不需要 GitHub 访问凭据。
 
 `/opt/sprout` 只是示例。要与已有服务同级部署，将 `SPROUT_DIR` 改为选定的绝对路径。已有部署不要重新 clone：进入实际项目根目录，运行 `SPROUT_DIR=$(pwd)`，跳过创建配置，直接读取原 Key。重新登录 SSH 后也这样设置变量；数据库仍独立保存。
 
