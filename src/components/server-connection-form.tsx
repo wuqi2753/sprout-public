@@ -32,7 +32,7 @@ import {
 type ConnectionFeedback = { title: string; message?: string; afterDismiss?: () => void };
 
 // REQ-016: docs/stories/v0.2.0/REQ-016-server-connection-form.md
-export function ServerConnectionForm({ onContinue }: { onContinue?: () => void }) {
+export function ServerConnectionForm({ onConnected }: { onConnected?: () => void }) {
   const router = useRouter();
   const theme = useTheme();
   const scrollViewRef = useRef<ScrollView>(null);
@@ -117,7 +117,7 @@ export function ServerConnectionForm({ onContinue }: { onContinue?: () => void }
         return;
       }
       Keyboard.dismiss();
-      if (onContinue) onContinue();
+      if (onConnected) onConnected();
       else router.replace('/');
     } catch {
       showError('无法安全保存 Server 配置。');
@@ -133,17 +133,17 @@ export function ServerConnectionForm({ onContinue }: { onContinue?: () => void }
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.screen}>
         <View style={styles.header}>
-          <Pressable
-            accessibilityLabel={onContinue ? '先在本地记录' : '返回'}
+          {!onConnected && <Pressable
+            accessibilityLabel="返回"
             accessibilityRole="button"
-            onPress={() => onContinue ? onContinue() : router.canGoBack() ? router.back() : router.replace('/')}
+            onPress={() => router.canGoBack() ? router.back() : router.replace('/')}
             style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
             <SymbolView
               name={{ ios: 'xmark', android: 'close', web: 'close' }}
               size={24}
               tintColor={theme.textSecondary}
             />
-          </Pressable>
+          </Pressable>}
         </View>
 
         <ScrollView
@@ -171,7 +171,7 @@ export function ServerConnectionForm({ onContinue }: { onContinue?: () => void }
                   keyboardType="url"
                   onChangeText={setServerApiUrl}
                   placeholder="https://memo.example.com"
-                  placeholderTextColor={theme.textSecondary}
+                  placeholderTextColor={theme.connectionPlaceholder}
                   selectionColor={theme.accent}
                   style={[
                     styles.input,
@@ -191,7 +191,7 @@ export function ServerConnectionForm({ onContinue }: { onContinue?: () => void }
                   onChangeText={setApiKey}
                   onFocus={() => { apiKeyFocused.current = true; }}
                   placeholder="输入 API Key"
-                  placeholderTextColor={theme.textSecondary}
+                  placeholderTextColor={theme.connectionPlaceholder}
                   secureTextEntry
                   selectionColor={theme.accent}
                   style={[
@@ -231,12 +231,6 @@ export function ServerConnectionForm({ onContinue }: { onContinue?: () => void }
                   {connecting && !saving ? '验证中…' : '验证连接'}
                 </ThemedText>
               </Pressable>
-              {onContinue && (
-                <Pressable accessibilityRole="button" onPress={onContinue}
-                  style={({ pressed }) => [styles.secondaryButton, pressed && styles.pressed]}>
-                  <ThemedText themeColor="textSecondary">先在本地记录</ThemedText>
-                </Pressable>
-              )}
             </View>
 
           </View>

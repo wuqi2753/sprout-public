@@ -38,7 +38,7 @@ import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useServerConnectionStatus } from '@/hooks/use-server-connection';
 import { findTagDraft, formatMemoTime } from '@/memos';
-import { addMemo, deleteMemo, getMemos, renameMemoFile, setMemoHidden } from '@/storage/memos';
+import { addMemo, deleteMemo, getMemos, initializeWelcomeMemo, renameMemoFile, setMemoHidden } from '@/storage/memos';
 import type { Memo } from '@/types/memo';
 import { syncMemoOutbox } from '@/sync/memo-outbox';
 import { createUuid } from '@/sync/uuid';
@@ -206,9 +206,9 @@ export default function HomeEntry() {
   if (entry === 'loading') return null;
   if (entry === 'capture') return <HomeScreen />;
   return <>
-    <ServerConnectionForm onContinue={() => setEntry('capture')} />
+    <ServerConnectionForm onConnected={() => setEntry('capture')} />
     <FeedbackDialog visible={configReadError} title="无法读取服务器配置"
-      message="请重新填写连接配置，或先在本地记录。" onDismiss={() => setConfigReadError(false)} />
+      message="请重新填写连接配置并连接服务器。" onDismiss={() => setConfigReadError(false)} />
   </>;
 }
 
@@ -365,13 +365,14 @@ function HomeScreen() {
   useFocusEffect(
     useCallback(() => {
       let active = true;
-      getMemos()
+      initializeWelcomeMemo()
+        .then(() => getMemos())
         .then((storedMemos) => {
           if (active) setMemos(storedMemos);
         })
         .catch((error) => {
-          console.error('无法读取记录', error);
-          if (active) setFeedback({ title: '无法读取记录', message: '请稍后重试。' });
+          console.error('无法初始化或读取记录', error);
+          if (active) setFeedback({ title: '无法加载记录', message: '欢迎笔记初始化或记录读取失败，请重新进入首页重试。' });
         });
       return () => {
         active = false;
