@@ -8,6 +8,7 @@ import { createInterface } from 'node:readline';
 import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { recordingStartModules } from '../fixtures/recording-start.mjs';
 
 // Python's standard library supplies SQLite without adding an app dependency.
 // REQ-039: Welcome initialization uses the same real SQLite harness.
@@ -98,15 +99,96 @@ function openSQLite(databasePath) {
 }
 
 function loadStorage(filename, modules) {
+  modules = { ...recordingStartModules(), ...modules };
   const source = readFileSync(new URL(`../../src/storage/${filename}`, import.meta.url), 'utf8');
   const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
   const exports = {};
   vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})`)((specifier) => {
+    if (!(specifier in modules) && specifier === '@/storage/file-objects.native') return { persistMemoFile: async () => { throw new Error("Unexpected file persistence"); } };
+    if (!(specifier in modules) && specifier === '@/storage/file-attachment-rules') return {};
     if (!(specifier in modules)) throw new Error(`Unexpected module: ${specifier}`);
     return modules[specifier];
   }, { exports }, exports);
   return exports;
 }
+
+// REQ-041: File-only rows and immutable Outbox snapshots in real SQLite.
+test('REQ-041 file records survive reopen and failed Outbox insertion rolls back', async (context) => {
+  const directory = isolatedDirectory(context);
+  const databasePath = path.join(directory, 'files.db');
+  let database = openSQLite(databasePath);
+  let sequence = 0;
+  const stored = { id: 'file-memo:file', objectKey: 'file-memo/object.pdf', uri: 'file://private/object.pdf', name: '账单.pdf', mediaType: 'application/pdf', size: 5, sha256: 'a'.repeat(64) };
+  const removed = [];
+  const loadMemos = () => loadStorage('memos.native.ts', {
+    '@/storage/database.native': nativeStorage(async () => database),
+    '@/storage/objects.native': { persistMemoImages: async () => [], resolveObjectUri: (key) => key, deleteMemoObjects: (id) => removed.push(id) },
+    '@/storage/file-objects.native': { persistMemoFile: async () => stored },
+    '@/storage/file-attachment-rules': { validateFileAttachment: (name, size) => ({ name, size, mediaType: 'application/pdf' }) },
+    '@/memos': { extractTags: () => [] },
+    '@/sync/uuid': { createUuid: () => `operation-${++sequence}` },
+  });
+  try {
+    await loadMemos().addMemo({ id: 'file-memo', content: '', createdOn: new Date(), imageUris: [], fileAttachments: [stored] });
+    assert.equal((await database.getFirstAsync('SELECT COUNT(*) AS count FROM memo_files')).count, 1);
+    const payload = JSON.parse((await database.getFirstAsync('SELECT payload FROM memo_outbox')).payload);
+    assert.deepEqual(payload.files, ['file-memo:file']);
+    assert.equal(payload.file_objects[0].sha256, stored.sha256);
+  } finally { await database.closeAsync(); }
+  database = openSQLite(databasePath);
+  try {
+    const memos = loadMemos();
+    assert.equal((await memos.getMemos())[0].fileAttachments[0].name, '账单.pdf');
+    await database.execAsync("CREATE TRIGGER reject_outbox BEFORE INSERT ON memo_outbox BEGIN SELECT RAISE(ABORT, 'disk full'); END;");
+    await assert.rejects(memos.addMemo({ id: 'failed-memo', content: '', createdOn: new Date(), imageUris: [], fileAttachments: [stored] }), /Failed to save/);
+    assert.deepEqual(removed, ['failed-memo']);
+    assert.equal((await database.getFirstAsync('SELECT COUNT(*) AS count FROM memos')).count, 1);
+    await database.execAsync('DROP TRIGGER reject_outbox');
+    await memos.deleteMemo('file-memo');
+    assert.equal((await database.getFirstAsync('SELECT COUNT(*) AS count FROM memo_files')).count, 0);
+    assert.deepEqual(removed, ['failed-memo'], 'pending create retains its file until delete is acknowledged');
+  } finally { await database.closeAsync(); }
+});
+
+// REQ-043: Real SQLite migration, restart, failure and Outbox isolation.
+test('REQ-043 hidden state survives migration and reopen without changing memo or Outbox', async (context) => {
+  const directory = isolatedDirectory(context);
+  const databasePath = path.join(directory, 'visibility.db');
+  let database = openSQLite(databasePath);
+  const loadMemos = () => loadStorage('memos.native.ts', {
+    '@/storage/database.native': nativeStorage(async () => database),
+    '@/storage/objects.native': { resolveObjectUri: (key) => key },
+    '@/memos': { extractTags: () => [] },
+    '@/sync/uuid': { createUuid: () => 'visibility-operation' },
+  });
+  let original;
+  let outbox;
+  try {
+    await database.execAsync("CREATE TABLE memos (id TEXT PRIMARY KEY, content TEXT NOT NULL, created_at TEXT NOT NULL, updated_at TEXT NOT NULL); INSERT INTO memos VALUES ('old', 'retained', '2026-10-01', '2026-10-02');");
+    const storage = loadMemos();
+    assert.equal((await storage.getMemos())[0].hidden, false);
+    original = await database.getFirstAsync('SELECT * FROM memos');
+    outbox = await database.getAllAsync('SELECT * FROM memo_outbox');
+    await storage.setMemoHidden('old', true);
+    assert.equal((await storage.getMemo('old')).hidden, true);
+    await assert.rejects(storage.setMemoHidden('missing', true), /missing memo/);
+    await assert.rejects(storage.setMemoHidden('old', 1), /boolean/);
+  } finally { await database.closeAsync(); }
+  database = openSQLite(databasePath);
+  try {
+    const storage = loadMemos();
+    assert.equal((await storage.getMemo('old')).hidden, true);
+    assert.deepEqual(await database.getFirstAsync('SELECT * FROM memos'), { ...original, hidden: 1 });
+    assert.deepEqual(await database.getAllAsync('SELECT * FROM memo_outbox'), outbox);
+    await database.execAsync("CREATE TRIGGER reject_visibility BEFORE UPDATE OF hidden ON memos BEGIN SELECT RAISE(ABORT, 'visibility write failure'); END;");
+    await assert.rejects(storage.setMemoHidden('old', false), /visibility write failure/);
+    assert.equal((await storage.getMemo('old')).hidden, true);
+    await database.execAsync('DROP TRIGGER reject_visibility;');
+    await storage.setMemoHidden('old', false);
+    assert.deepEqual(await database.getFirstAsync('SELECT * FROM memos'), original);
+    assert.deepEqual(await database.getAllAsync('SELECT * FROM memo_outbox'), outbox);
+  } finally { await database.closeAsync(); }
+});
 
 function nativeStorage(open) {
   let sequence = 0;
@@ -115,6 +197,92 @@ function nativeStorage(open) {
     '@/sync/uuid': { createUuid: () => `migration-operation-${++sequence}` },
   });
 }
+
+// REQ-052: real SQLite validates relation migration, ordering, restart and queue retention.
+test('REQ-052 legacy file migrates without changing its pending snapshot and permits additional files', async (context) => {
+  const directory = isolatedDirectory(context);
+  const databasePath = path.join(directory, 'legacy-files.db');
+  let database = openSQLite(databasePath);
+  await nativeStorage(async () => database).getDatabase();
+  const originalPayload = JSON.stringify({ content: 'old', files: ['legacy:file'], file_objects: [{ id: 'legacy:file', object_key: 'legacy/old.pdf' }] });
+  await database.execAsync(`DROP TABLE memo_files;
+    CREATE TABLE memo_files (id TEXT PRIMARY KEY NOT NULL, memo_id TEXT NOT NULL UNIQUE, object_key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL, media_type TEXT NOT NULL, size INTEGER NOT NULL, sha256 TEXT NOT NULL,
+      FOREIGN KEY(memo_id) REFERENCES memos(id) ON DELETE CASCADE);
+    INSERT INTO memos(id,content,created_at,updated_at) VALUES('legacy','old','2026-10-05T00:00:00Z','2026-10-05T00:00:00Z');`);
+  await database.runAsync('INSERT INTO memo_files VALUES(?,?,?,?,?,?,?)', 'legacy:file', 'legacy', 'legacy/old.pdf', 'old.pdf', 'application/pdf', 5, 'a'.repeat(64));
+  await database.runAsync("INSERT INTO memo_outbox(operation_id,memo_id,operation,payload,state,created_at) VALUES('old-op','legacy','create',?,'pending','2026-10-05T00:00:00Z')", originalPayload);
+  await database.closeAsync();
+  for (let attempt = 0; attempt < 2; attempt++) {
+    database = openSQLite(databasePath);
+    try {
+      await nativeStorage(async () => database).getDatabase();
+      assert.equal((await database.getFirstAsync('SELECT position FROM memo_files')).position, 0);
+      assert.equal((await database.getFirstAsync("SELECT payload FROM memo_outbox WHERE operation_id='old-op'")).payload, originalPayload);
+      if (attempt === 0) await database.runAsync('INSERT INTO memo_files VALUES(?,?,?,?,?,?,?,?)', 'legacy:11111111-1111-4111-8111-111111111111:file', 'legacy', 'legacy/new.pdf', 'new.pdf', 'application/pdf', 5, 'b'.repeat(64), 1);
+      assert.deepEqual((await database.getAllAsync('SELECT name FROM memo_files ORDER BY position')).map((file) => file.name), ['old.pdf', 'new.pdf']);
+    } finally { await database.closeAsync(); }
+  }
+});
+
+test('REQ-052 mixed create survives reopen and failed multi-file update rolls back atomically', async (context) => {
+  const directory = isolatedDirectory(context);
+  const databasePath = path.join(directory, 'mixed.db');
+  let database = openSQLite(databasePath);
+  let sequence = 0;
+  const objects = new Set();
+  const loadMemos = () => loadStorage('memos.native.ts', {
+    '@/storage/database.native': nativeStorage(async () => database),
+    '@/storage/objects.native': {
+      resolveObjectUri: (key) => `private://${key}`,
+      persistMemoImages: async (id, uris) => uris.map(() => { const key = `${id}/${++sequence}.png`; objects.add(key); return key; }),
+      deleteObjectKeys: (keys) => keys.forEach((key) => objects.delete(key)),
+      deleteMemoObjects: (id) => { for (const key of objects) if (key.startsWith(`${id}/`)) objects.delete(key); },
+    },
+    '@/storage/file-objects.native': { persistMemoFile: async (id, file, revision) => {
+      const objectKey = `${id}/${++sequence}.pdf`; objects.add(objectKey);
+      return { ...file, id: `${id}:${revision}:file`, objectKey, sha256: 'a'.repeat(64) };
+    } },
+    '@/storage/file-attachment-rules': { validateFileAttachment: (name, size) => ({ name, size, mediaType: 'application/pdf' }) },
+    '@/memos': { extractTags: () => [] },
+    '@/sync/uuid': { createUuid: () => `11111111-1111-4111-8111-${String(++sequence).padStart(12, '0')}` },
+  });
+  const files = ['a', 'b', 'c'].map((name) => ({ uri: `draft-${name}`, name: `${name}.pdf`, mediaType: 'application/pdf', size: 5 }));
+  try {
+    const memos = loadMemos();
+    await memos.addMemo({ id: 'mixed', content: '', createdOn: new Date('2026-10-05T00:00:00Z'), imageUris: ['one', 'two'], fileAttachments: files });
+    const memo = await memos.getMemo('mixed');
+    assert.equal(memo.imageUris.length, 2);
+    assert.deepEqual(Array.from(memo.fileAttachments, (file) => file.name), ['a.pdf', 'b.pdf', 'c.pdf']);
+    const queued = JSON.parse((await database.getFirstAsync('SELECT payload FROM memo_outbox')).payload);
+    assert.equal(queued.images.length + queued.files.length, 5);
+    await assert.rejects(memos.addMemo({ id: 'excess', content: '', createdOn: new Date(), imageUris: ['one', 'two', 'three'], fileAttachments: files }), /5/);
+  } finally { await database.closeAsync(); }
+  database = openSQLite(databasePath);
+  try {
+    const memos = loadMemos();
+    const memo = await memos.getMemo('mixed');
+    assert.equal(memo.imageUris.length, 2);
+    assert.equal(memo.fileAttachments.length, 3);
+    const originalObjects = [...objects];
+    const snapshot = await database.getAllAsync('SELECT * FROM memo_outbox');
+    await database.execAsync("CREATE TRIGGER reject_mixed BEFORE INSERT ON memo_outbox BEGIN SELECT RAISE(ABORT, 'mixed write failure'); END;");
+    await assert.rejects(memos.updateMemoDraft('mixed', { content: 'changed', imageUris: [], fileAttachments: files }, new Date()), /mixed write failure/);
+    assert.deepEqual([...objects], originalObjects);
+    assert.deepEqual(await database.getAllAsync('SELECT * FROM memo_outbox'), snapshot);
+    assert.equal((await memos.getMemo('mixed')).fileAttachments.length, 3);
+    await database.execAsync('DROP TRIGGER reject_mixed');
+    await memos.removeMemoFile('mixed', memo.fileAttachments[1].id);
+    const afterRemoval = await memos.getMemo('mixed');
+    assert.equal(afterRemoval.imageUris.length, 2);
+    assert.deepEqual(Array.from(afterRemoval.fileAttachments, (file) => file.name), ['a.pdf', 'c.pdf']);
+    await memos.updateMemoDraft('mixed', { content: '', imageUris: [], fileAttachments: [afterRemoval.fileAttachments[0]] }, new Date());
+    await memos.removeMemoFile('mixed', afterRemoval.fileAttachments[0].id);
+    assert.equal(await memos.getMemo('mixed'), undefined);
+    assert.equal((await database.getFirstAsync('SELECT operation FROM memo_outbox ORDER BY rowid DESC')).operation, 'delete');
+    assert.deepEqual([...objects], originalObjects, 'queued snapshots retain all original objects until sync');
+  } finally { await database.closeAsync(); }
+});
 
 function isolatedDirectory(context) {
   const temporary = new URL('../../.tmp/', import.meta.url);

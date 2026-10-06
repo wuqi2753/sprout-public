@@ -17,6 +17,12 @@ export type MemoOperationRequest = {
   baseVersion?: number;
   images?: string[];
   imageObjects?: { id: string; object_key: string }[];
+  files?: string[];
+  fileObjects?: OutboxFileObject[];
+};
+
+export type OutboxFileObject = {
+  id: string; object_key: string; name: string; media_type: string; size: number; sha256: string;
 };
 
 export type OutboxFailure = {
@@ -39,6 +45,8 @@ export type MemoOutboxDependencies = {
 type OperationPayload = {
   content?: string; created_at?: string; images?: string[];
   image_objects?: { id: string; object_key: string }[];
+  files?: string[];
+  file_objects?: OutboxFileObject[];
 };
 
 export async function synchronizeMemoOutbox(dependencies: MemoOutboxDependencies) {
@@ -63,6 +71,8 @@ export async function synchronizeMemoOutbox(dependencies: MemoOutboxDependencies
           createdAt: payload.created_at,
           images: payload.images,
           imageObjects: payload.image_objects,
+          files: payload.files,
+          fileObjects: payload.file_objects,
           baseVersion: row.operation === 'create'
             ? undefined
             : await dependencies.getLastServerVersion(row.memoId),

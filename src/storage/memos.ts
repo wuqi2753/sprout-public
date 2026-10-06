@@ -1,6 +1,8 @@
 import { extractTags } from '@/memos';
-import type { CreateMemoInput, Memo } from '@/types/memo';
+import type { CreateMemoInput, Memo, MemoEditInput } from '@/types/memo';
 import { createUuid } from '@/sync/uuid';
+import { rememberRecordingStart } from '@/storage/recording-start';
+import { earliestRecordingDate } from '@/storage/memo-statistics-rules';
 
 let browserMemos: Memo[] = [];
 let welcomeMemoInitialized = false;
@@ -15,6 +17,7 @@ export async function initializeWelcomeMemo() {
 }
 
 export async function getMemos() {
+  await rememberRecordingStart(browserMemos.map((memo) => memo.createdOn));
   return browserMemos;
 }
 
@@ -22,8 +25,18 @@ export async function getMemo(id: string) {
   return browserMemos.find((memo) => memo.id === id);
 }
 
+// REQ-043: Browser preview keeps visibility in memory, like its memo content.
+export async function setMemoHidden(id: string, hidden: boolean) {
+  if (typeof hidden !== 'boolean') throw new Error('Memo hidden must be a boolean');
+  if (!browserMemos.some((memo) => memo.id === id)) throw new Error(`Cannot change visibility of missing memo: ${id}`);
+  browserMemos = browserMemos.map((memo) => memo.id === id ? { ...memo, hidden } : memo);
+}
+
 export async function addMemo(input: CreateMemoInput) {
+  earliestRecordingDate(null, [input.createdOn]);
   const content = input.content.trim();
+  if (input.imageUris.length + (input.fileAttachments?.length ?? 0) > 5) throw new Error('图片和文件合计不能超过 5 个。');
+  if (input.fileAttachments?.length) throw new Error('请使用手机 App 保存文件附件');
   if (!content && input.imageUris.length === 0) throw new Error('Cannot save a memo without text or images');
   browserMemos = [
     {
@@ -34,9 +47,11 @@ export async function addMemo(input: CreateMemoInput) {
       tags: extractTags(content),
       imageUris: input.imageUris,
       synced: false,
+      fileAttachments: [],
     },
     ...browserMemos,
   ];
+  await rememberRecordingStart([input.createdOn]);
 }
 
 export async function updateMemoContent(id: string, content: string, savedAt: Date) {
@@ -48,6 +63,28 @@ export async function updateMemoContent(id: string, content: string, savedAt: Da
 }
 
 export async function deleteMemo(id: string) {
+  await getMemos();
   if (!browserMemos.some((memo) => memo.id === id)) throw new Error(`Cannot delete missing memo: ${id}`);
   browserMemos = browserMemos.filter((memo) => memo.id !== id);
+}
+
+// REQ-047: browser preview supports the same draft save/cancel boundary.
+// REQ-049: ordinary file persistence is available in the native App only.
+export async function renameMemoFile(_id: string, _fileId: string, _filenameStem: string): Promise<void> {
+  throw new Error('请使用手机 App 重命名文件附件。');
+}
+
+export async function removeMemoFile(_id: string, _fileId: string): Promise<void> {
+  throw new Error('请使用手机 App 删除文件附件。');
+}
+
+export async function updateMemoDraft(id: string, draft: MemoEditInput, savedAt: Date) {
+  if (!browserMemos.some((memo) => memo.id === id)) throw new Error(`Cannot update missing memo: ${id}`);
+  const content = draft.content.trim();
+  if (!content && !draft.imageUris.length && !(draft.fileAttachments?.length)) throw new Error('记录内容不能为空');
+  if (draft.imageUris.length + (draft.fileAttachments?.length ?? 0) > 5) throw new Error('附件数量或类型组合无效');
+  if (draft.fileAttachments?.length) throw new Error('请使用手机 App 保存文件附件');
+  if (Number.isNaN(savedAt.getTime())) throw new Error('保存时间无效');
+  browserMemos = browserMemos.map((memo) => memo.id === id
+    ? { ...memo, content, imageUris: [...draft.imageUris], savedAt, tags: extractTags(content), synced: false } : memo);
 }

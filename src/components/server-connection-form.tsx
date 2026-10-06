@@ -163,9 +163,9 @@ export function ServerConnectionForm({ onContinue }: { onContinue?: () => void }
 
             <View style={styles.formCard}>
               <View style={styles.fieldGroup}>
-                <ThemedText style={styles.fieldLabel}>Server API 地址</ThemedText>
+                <ThemedText style={styles.fieldLabel}>服务器 API 地址</ThemedText>
                 <TextInput
-                  accessibilityLabel="Server API 地址"
+                  accessibilityLabel="服务器 API 地址"
                   autoCapitalize="none"
                   autoCorrect={false}
                   keyboardType="url"

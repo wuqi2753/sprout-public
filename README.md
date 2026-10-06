@@ -5,7 +5,7 @@
 
 ## Android 安装包
 
-在 [Releases](https://github.com/wuqi2753/sprout-public/releases/latest) 下载 [sprout-1.1.2-android.apk](https://github.com/wuqi2753/sprout-public/releases/download/v1.1.2/sprout-1.1.2-android.apk)，支持 Android 7.0+、ARM64 / ARMv7 手机。正式版内置运行代码，不需要 localhost 或开发机；首次启动后填写自己的 Server 地址与 API Key。
+在 [Releases](https://github.com/wuqi2753/sprout-public/releases/latest) 下载 [sprout-1.3.0-android.apk](https://github.com/wuqi2753/sprout-public/releases/download/v1.3.0/sprout-1.3.0-android.apk)，支持 Android 7.0+、ARM64 / ARMv7 手机。正式版内置运行代码，不需要 localhost 或开发机；首次启动后填写自己的 Server 地址与 API Key。
 
 正式版与原调试版签名不同，不能直接覆盖安装。已有调试版记录时先保留并备份数据，不要直接卸载；后续正式版可使用同一签名正常更新。
 

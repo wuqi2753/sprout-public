@@ -59,6 +59,9 @@ yarn-error.*
 .tmp/
 __pycache__/
 
+# Local saved tutorials may contain personal browser/account information.
+/docs/tutorial/
+
 example
 
 # generated native folders

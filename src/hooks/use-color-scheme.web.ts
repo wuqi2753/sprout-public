@@ -1,5 +1,6 @@
 import { useSyncExternalStore } from 'react';
 import { useColorScheme as useRNColorScheme } from 'react-native';
+import { useAppTheme } from '@/components/app-theme-provider';
 
 const subscribeToHydration = () => () => {};
 
@@ -14,10 +15,11 @@ export function useColorScheme() {
   );
 
   const colorScheme = useRNColorScheme();
+  const appTheme = useAppTheme();
 
   if (hasHydrated) {
-    return colorScheme;
+    return appTheme?.colorScheme ?? colorScheme;
   }
 
-  return 'light';
+  return appTheme?.colorScheme ?? 'dark';
 }

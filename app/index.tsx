@@ -4,18 +4,17 @@ import { getServerConnectionConfig } from '@/storage/server-connection';
 import { Image } from 'expo-image';
 import { BlurTargetView, BlurView } from 'expo-blur';
 import { SymbolView } from 'expo-symbols';
+import Svg, { Path } from 'react-native-svg';
 import { useFocusEffect, useRouter } from 'expo-router';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ActivityIndicator,
-  Alert,
   Animated,
   KeyboardAvoidingView,
   BackHandler,
   Keyboard,
   Modal,
   Platform,
-  RefreshControl,
   ScrollView,
   StyleSheet,
   TextInput,
@@ -23,7 +22,7 @@ import {
   useWindowDimensions,
   View,
 } from 'react-native';
-import { SafeAreaView } from 'react-native-safe-area-context';
+import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
 import { useMentions, type PatternsConfig } from 'react-native-controlled-mentions';
 import * as ImagePicker from 'expo-image-picker';
@@ -35,29 +34,33 @@ import { FeedbackDialog } from '@/components/feedback-dialog';
 import { Pressable } from '@/components/haptic-pressable';
 import { MemoSyncStatus } from '@/components/memo-sync-status';
 import { ThemedText } from '@/components/themed-text';
-import { MaxContentWidth, Spacing } from '@/constants/theme';
+import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useServerConnectionStatus } from '@/hooks/use-server-connection';
-import { formatMemoTime } from '@/memos';
-import { addMemo, deleteMemo, getMemos } from '@/storage/memos';
+import { findTagDraft, formatMemoTime } from '@/memos';
+import { addMemo, deleteMemo, getMemos, renameMemoFile, setMemoHidden } from '@/storage/memos';
 import type { Memo } from '@/types/memo';
 import { syncMemoOutbox } from '@/sync/memo-outbox';
 import { createUuid } from '@/sync/uuid';
+import { FileAttachmentCard } from '@/components/file-attachment-card';
+import { FileTypeIcon } from '@/components/file-type-icon';
+import { CaretTagSuggestions } from '@/components/caret-tag-suggestions';
+import { CAPTURE_ENTRY_BOTTOM_GAP, CaptureBackdropFade } from '@/components/capture-backdrop-fade';
+import { FileNameActions } from '@/components/file-name-actions';
+import { chooseFileAttachments, discardImportedFile } from '@/storage/import-file';
+import { useSharedFile } from '@/hooks/use-shared-file';
+import type { FileAttachment } from '@/types/attachment';
+import { openFileAttachment } from '@/storage/open-file';
+import { hiddenMemoSession } from '@/auth/hidden-memo-session';
+import { useHiddenMemoAccess } from '@/hooks/use-hidden-memo-access';
+import { MemoSearchHeader, MemoSearchShortcuts, MemoSearchSummary, MemoRecentSearches } from '@/components/memo-search';
+import { getSearchHistory, saveSearchHistory } from '@/storage/search-history';
+import { addRecentSearch, type SearchPartition } from '@/storage/search-history-rules';
+import { MemoSearchFiltersSheet } from '@/components/memo-search-filters';
+import { emptySearchFilters, hasSearchFilters, matchesMemoSearch, sortSearchMemos, type MemoSearchFilters, type MemoSearchSort } from '@/search/memo-search';
 
 const now = new Date();
 type TextSelection = { start: number; end: number };
-
-function findTagDraft(content: string, cursorPosition: number) {
-  const contentBeforeCursor = content.slice(0, cursorPosition);
-  const match = contentBeforeCursor.match(/(^|\s)#([^\s#]*)$/);
-  if (!match) return null;
-
-  return {
-    query: match[2],
-    start: contentBeforeCursor.length - match[2].length - 1,
-    end: cursorPosition,
-  };
-}
 
 function MemoContent({ content, numberOfLines }: { content: string; numberOfLines?: number }) {
   const theme = useTheme();
@@ -210,15 +213,25 @@ export default function HomeEntry() {
 }
 
 function HomeScreen() {
+  const insets = useSafeAreaInsets();
+  const [captureEntryHeight, setCaptureEntryHeight] = useState(48);
   const theme = useTheme();
   const router = useRouter();
   const connectionStatus = useServerConnectionStatus();
-  const { height: windowHeight, width: windowWidth } = useWindowDimensions();
-  const usesCompactComposer = windowHeight <= 500;
+  const { height: windowHeight, width: windowWidth, fontScale } = useWindowDimensions();
+  // REQ-058: docs/stories/v0.2.0/REQ-058-horizontal-memo-actions.md
+  const memoMenuWidth = Math.min(204 + Math.max(0, fontScale - 1) * 56, 264, windowWidth - insets.left - insets.right - 24);
+  const memoMenuHeight = 52 + 40 * fontScale;
   const composerRef = useRef<TextInput>(null);
+  const composerSheetRef = useRef<View>(null);
+  const [composerInputHeight, setComposerInputHeight] = useState(72);
+  const [composerScrollOffset, setComposerScrollOffset] = useState(0);
+  const [composerWidth, setComposerWidth] = useState(0);
   const composerBlurTarget = useRef<View>(null);
   const [content, setContent] = useState('');
   const [imageUris, setImageUris] = useState<string[]>([]);
+  const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
+  const [importingFile, setImportingFile] = useState(false);
   const [composerSelection, setComposerSelection] = useState<TextSelection>({ start: 0, end: 0 });
   const [composerOpen, setComposerOpen] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
@@ -226,26 +239,89 @@ function HomeScreen() {
   const [savingMemo, setSavingMemo] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string>();
+  const [feedback, setFeedback] = useState<{ title: string; message?: string }>();
+  function showFeedback(title: string, message?: string) { setFeedback({ title, message }); }
+  function showStorageError(title: string, error: unknown) {
+    console.error(title, error);
+    showFeedback(title, '请稍后重试。');
+  }
   const refreshingRef = useRef(false);
   const refreshAndSyncRef = useRef<() => void>(() => {});
   const scrollOffsetY = useRef(0);
   const refreshStartedAtTop = useRef(false);
-  const pullOffset = useRef(new Animated.Value(0)).current;
-  const [imagePreview, setImagePreview] = useState<{ imageUris: string[]; index: number }>();
+  const [pullOffset] = useState(() => new Animated.Value(0));
+  const [imagePreview, setImagePreview] = useState<{ imageUris: string[]; index: number; hidden: boolean }>();
+  const [fileActionMemo, setFileActionMemo] = useState<Memo & { selectedFileId: string }>();
   const [openMemoMenuId, setOpenMemoMenuId] = useState<string | null>(null);
   const [memoMenuPosition, setMemoMenuPosition] = useState({ left: 0, top: 0 });
   const [expandedMemoIds, setExpandedMemoIds] = useState<string[]>([]);
   const [searchVisible, setSearchVisible] = useState(false);
   const [query, setQuery] = useState('');
+  const [searchFilters, setSearchFilters] = useState<MemoSearchFilters>(emptySearchFilters);
+  const [searchFiltersOpen, setSearchFiltersOpen] = useState(false);
+  const [searchSort, setSearchSort] = useState<MemoSearchSort>('created-desc');
   const [filterOpen, setFilterOpen] = useState(false);
+  // REQ-043: Hidden notes are reached only through the sidebar.
+  const hiddenMemoAccess = useHiddenMemoAccess();
+  const showingHidden = hiddenMemoAccess.unlocked;
+  const searchPartition: SearchPartition = showingHidden ? 'hidden' : 'ordinary';
+  const [searchHistory, setSearchHistory] = useState<{ partition: SearchPartition; keywords: string[] }>({ partition: 'ordinary', keywords: [] });
+  const searchHistoryQueue = useRef(Promise.resolve());
+  useEffect(() => {
+    if (!searchVisible) return;
+    let active = true;
+    searchHistoryQueue.current = searchHistoryQueue.current.then(async () => {
+      const keywords = await getSearchHistory(searchPartition);
+      if (active) setSearchHistory({ partition: searchPartition, keywords });
+    }).catch(() => { if (active) showFeedback('无法读取最近搜索', '本地搜索历史读取失败，请稍后重试。'); });
+    return () => { active = false; };
+  }, [searchVisible, searchPartition]);
+
+  function saveRecentSearch(keyword?: string) {
+    const partition = searchPartition;
+    searchHistoryQueue.current = searchHistoryQueue.current.then(async () => {
+      const keywords = keyword === undefined ? [] : addRecentSearch(await getSearchHistory(partition), keyword);
+      await saveSearchHistory(partition, keywords);
+      setSearchHistory({ partition, keywords });
+    }).catch(() => showFeedback('无法保存最近搜索', '本地搜索历史保存失败，请稍后重试。'));
+  }
+  const visibleMemos = useMemo(() => memos.filter((memo) => Boolean(memo.hidden) === showingHidden), [memos, showingHidden]);
   const [visibleYear, setVisibleYear] = useState(now.getFullYear());
   const [visibleMonth, setVisibleMonth] = useState(now.getMonth());
   const [activeDay, setActiveDay] = useState<number | null>(null);
   const [activeTag, setActiveTag] = useState<string | null>(null);
-  const scrollGesture = useMemo(() => Gesture.Native().enabled(Platform.OS === 'android'), []);
+  useEffect(() => {
+    let previouslyUnlocked = hiddenMemoSession.getSnapshot().unlocked;
+    return hiddenMemoSession.subscribe(() => {
+      const unlocked = hiddenMemoSession.getSnapshot().unlocked;
+      const relocked = previouslyUnlocked && !unlocked;
+      previouslyUnlocked = unlocked;
+      if (!relocked) return;
+      setFileActionMemo(undefined);
+      setOpenMemoMenuId(null);
+      setImagePreview(undefined);
+      setExpandedMemoIds([]);
+      setQuery('');
+      setSearchVisible(false);
+      setSearchFiltersOpen(false);
+      setSearchFilters(emptySearchFilters());
+      setActiveDay(null);
+      setActiveTag(null);
+    });
+  }, []);
+  const scrollGesture = useMemo(() => Gesture.Native(), []);
+  const searchBackGesture = useMemo(() => Gesture.Pan()
+    .enabled(searchVisible && !searchFiltersOpen)
+    .activeOffsetX(24)
+    .failOffsetY([-18, 18])
+    .simultaneousWithExternalGesture(scrollGesture)
+    .runOnJS(true)
+    .onEnd((event) => { if (event.translationX >= 64) closeSearch(); }), [searchVisible, searchFiltersOpen, scrollGesture]);
+  // Gesture callbacks run after rendering; these methods only register them.
+  /* eslint-disable react-hooks/refs */
   const refreshGesture = useMemo(
     () => Gesture.Pan()
-      .enabled(Platform.OS === 'android')
+      .enabled(!searchVisible)
       .activeOffsetY(8)
       .failOffsetY(-8)
       .simultaneousWithExternalGesture(scrollGesture)
@@ -259,11 +335,17 @@ function HomeScreen() {
         }
       })
       .onEnd((event) => {
+        if (refreshingRef.current) return;
         if (refreshStartedAtTop.current && event.translationY >= 70) refreshAndSyncRef.current();
         else Animated.spring(pullOffset, { toValue: 0, useNativeDriver: true }).start();
+      })
+      .onFinalize(() => {
+        refreshStartedAtTop.current = false;
+        if (!refreshingRef.current) Animated.spring(pullOffset, { toValue: 0, useNativeDriver: true }).start();
       }),
-    [pullOffset, scrollGesture],
+    [pullOffset, scrollGesture, searchVisible],
   );
+  /* eslint-enable react-hooks/refs */
   const composerPatterns = useMemo<PatternsConfig>(
     () => ({
       tag: {
@@ -287,32 +369,47 @@ function HomeScreen() {
         .then((storedMemos) => {
           if (active) setMemos(storedMemos);
         })
-        .catch((error) => showStorageError('无法读取记录', error));
+        .catch((error) => {
+          console.error('无法读取记录', error);
+          if (active) setFeedback({ title: '无法读取记录', message: '请稍后重试。' });
+        });
       return () => {
         active = false;
+        if (hiddenMemoSession.getSnapshot().authenticating) hiddenMemoSession.lock();
       };
-    }, []),
+    }, [setFeedback, setMemos]),
   );
 
   useFocusEffect(
     useCallback(() => {
       const backSubscription = BackHandler.addEventListener('hardwareBackPress', () => {
-        if (activeDay === null && activeTag === null) return false;
+        if (searchVisible) {
+          Keyboard.dismiss();
+          setQuery('');
+          setSearchFilters(emptySearchFilters());
+          setSearchFiltersOpen(false);
+          setSearchVisible(false);
+          return true;
+        }
+        if (activeDay === null && activeTag === null && !showingHidden) return false;
 
         setActiveDay(null);
         setActiveTag(null);
+        hiddenMemoSession.lock();
+        setQuery('');
+        setSearchVisible(false);
         setVisibleYear(now.getFullYear());
         setVisibleMonth(now.getMonth());
         return true;
       });
 
       return () => backSubscription.remove();
-    }, [activeDay, activeTag]),
+    }, [activeDay, activeTag, showingHidden, searchVisible]),
   );
 
   const tags = useMemo<TagCount[]>(() => {
     const counts = new Map<string, number>();
-    memos.forEach((memo) => memo.tags.forEach((tag) => counts.set(tag, (counts.get(tag) ?? 0) + 1)));
+    memos.filter((memo) => !memo.hidden).forEach((memo) => memo.tags.forEach((tag) => counts.set(tag, (counts.get(tag) ?? 0) + 1)));
     return [...counts.entries()]
       .map(([name, count]) => ({ name, count }))
       .sort((first, second) => second.count - first.count || first.name.localeCompare(second.name));
@@ -321,19 +418,21 @@ function HomeScreen() {
   const recordDays = useMemo(
     () =>
       new Set(
-        memos
+        visibleMemos
           .filter(
             (memo) =>
               memo.createdOn.getFullYear() === visibleYear && memo.createdOn.getMonth() === visibleMonth,
           )
           .map((memo) => memo.createdOn.getDate()),
       ),
-    [memos, visibleMonth, visibleYear],
+    [visibleMemos, visibleMonth, visibleYear],
   );
 
   const filteredMemos = useMemo(() => {
+    // REQ-055 / REQ-056: Search doesn't inherit the sidebar's day or tag.
+    if (searchVisible) return sortSearchMemos(visibleMemos.filter((memo) => matchesMemoSearch(memo, query, searchFilters)), searchSort);
     const normalizedQuery = query.trim().toLocaleLowerCase();
-    return memos.filter((memo) => {
+    return visibleMemos.filter((memo) => {
       const matchesQuery = !normalizedQuery || memo.content.toLocaleLowerCase().includes(normalizedQuery);
       const matchesDay =
         activeDay === null ||
@@ -343,10 +442,13 @@ function HomeScreen() {
       const matchesTag = activeTag === null || memo.tags.includes(activeTag);
       return matchesQuery && matchesDay && matchesTag;
     });
-  }, [activeDay, activeTag, memos, query, visibleMonth, visibleYear]);
+  }, [activeDay, activeTag, visibleMemos, query, visibleMonth, visibleYear, searchVisible, searchFilters, searchSort]);
 
-  const canSave = content.trim().length > 0 || imageUris.length > 0;
-  const hasActiveConditions = query.trim().length > 0 || activeDay !== null || activeTag !== null;
+  const canSave = imageUris.length + fileAttachments.length <= 5 && (content.trim().length > 0 || imageUris.length > 0 || fileAttachments.length > 0);
+  const fileActionAttachment = fileActionMemo?.fileAttachments.find((file) => file.id === fileActionMemo.selectedFileId);
+  const hasActiveConditions = searchVisible ? query.trim().length > 0 || hasSearchFilters(searchFilters) : query.trim().length > 0 || activeDay !== null || activeTag !== null;
+  const searchHasResults = searchVisible && (query.trim().length > 0 || hasSearchFilters(searchFilters));
+  const searchTags = useMemo(() => [...new Set(visibleMemos.flatMap((memo) => memo.tags))].sort((first, second) => first.localeCompare(second)), [visibleMemos]);
   const tagDraft = findTagDraft(content, composerSelection.start);
   const suggestedTags = tagDraft
     ? tags
@@ -368,27 +470,55 @@ function HomeScreen() {
   useEffect(() => {
     if (!composerOpen) return;
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
-      if (!savingMemo) {
+      if (!savingMemo && !importingFile) {
         Keyboard.dismiss();
         setContent('');
         setImageUris([]);
+        fileAttachments.forEach(discardImportedFile);
+        setFileAttachments([]);
         setComposerSelection({ start: 0, end: 0 });
         setComposerOpen(false);
       }
       return true;
     });
     return () => subscription.remove();
-  }, [composerOpen, savingMemo]);
+  }, [composerOpen, savingMemo, importingFile, fileAttachments]);
 
-  function showStorageError(title: string, error: unknown) {
-    console.error(title, error);
-    if (Platform.OS === 'web') window.alert(`${title}，请稍后重试。`);
-    else Alert.alert(title, '请稍后重试。');
+  // REQ-052: sharing appends to the current draft without replacing text or images.
+  function receiveFileAttachment(incoming: FileAttachment[]) {
+    if (savingMemo || importingFile) {
+      incoming.forEach(discardImportedFile);
+      showFeedback('暂时无法导入', '请等待当前操作完成，再分享文件。');
+      return;
+    }
+    if (imageUris.length + fileAttachments.length + incoming.length > 5) {
+      incoming.forEach(discardImportedFile);
+      showFeedback('附件已达上限', '图片和文件合计最多 5 个，请先移除附件。');
+      return;
+    }
+    setFileAttachments((files) => [...files, ...incoming]);
+    setComposerOpen(true);
+  }
+
+  function showFileError(error: unknown) {
+    const message = error instanceof Error ? error.message : '无法读取文件，请重新选择。';
+    showFeedback('无法导入文件', message);
+  }
+  useSharedFile(receiveFileAttachment, showFileError);
+
+  async function chooseMemoFile() {
+    if (importingFile || savingMemo) return;
+    setImportingFile(true);
+    try {
+      const selected = await chooseFileAttachments(5 - imageUris.length - fileAttachments.length);
+      if (selected.length) setFileAttachments((files) => [...files, ...selected]);
+    } catch (error) { showFileError(error); }
+    finally { setImportingFile(false); }
   }
 
   async function saveMemo() {
     const normalizedContent = content.trim();
-    if ((!normalizedContent && imageUris.length === 0) || savingMemo) return;
+    if ((!normalizedContent && imageUris.length === 0 && !fileAttachments.length) || savingMemo || importingFile) return;
 
     const savedAt = new Date();
     setSavingMemo(true);
@@ -398,9 +528,12 @@ function HomeScreen() {
         content: normalizedContent,
         createdOn: savedAt,
         imageUris,
+        fileAttachments,
       });
       setContent('');
       setImageUris([]);
+      fileAttachments.forEach(discardImportedFile);
+      setFileAttachments([]);
       setComposerSelection({ start: 0, end: 0 });
       Keyboard.dismiss();
       setComposerOpen(false);
@@ -421,22 +554,22 @@ function HomeScreen() {
     if (refreshingRef.current) return;
     if (connectionStatus !== 'connected') {
       setSyncFeedback('请先连接服务器');
-      if (Platform.OS === 'android') {
-        Animated.spring(pullOffset, { toValue: 0, useNativeDriver: true }).start();
-      }
+      Animated.spring(pullOffset, { toValue: 0, useNativeDriver: true }).start();
       return;
     }
     refreshingRef.current = true;
     setRefreshing(true);
-    if (Platform.OS === 'android') {
-      pullOffset.stopAnimation();
-      pullOffset.setValue(80);
-    }
+    pullOffset.stopAnimation();
+    pullOffset.setValue(80);
     try {
       await syncMemoOutbox();
       setMemos(await getMemos());
     } catch (error) {
       console.error('Unable to synchronize memos', error);
+      const reason = error instanceof Error ? error.message : '';
+      setSyncFeedback(/http_404|http_405/.test(reason) ? '服务器尚未支持文件上传，请升级 Server 后重试。文件已保存在手机上。'
+        : /invalid_api_key|http_401/.test(reason) ? '服务器凭据无效，请更新连接配置后重试。'
+        : '部分记录未同步，请检查网络或服务器后重试。');
       try {
         setMemos(await getMemos());
       } catch (storageError) {
@@ -445,26 +578,24 @@ function HomeScreen() {
     } finally {
       refreshingRef.current = false;
       setRefreshing(false);
-      if (Platform.OS === 'android') {
-        Animated.spring(pullOffset, { toValue: 0, useNativeDriver: true }).start();
-      }
+      Animated.spring(pullOffset, { toValue: 0, useNativeDriver: true }).start();
     }
   }
-  refreshAndSyncRef.current = refreshAndSync;
+  useEffect(() => { refreshAndSyncRef.current = refreshAndSync; });
 
   async function chooseMemoImage() {
-    const remainingImageCount = 9 - imageUris.length;
-    if (remainingImageCount === 0) {
-      if (Platform.OS === 'web') window.alert('每条记录最多添加 9 张图片。');
-      else Alert.alert('图片数量已达上限', '每条记录最多添加 9 张图片。');
+    if (importingFile || savingMemo) return;
+    const remainingImageCount = 5 - imageUris.length - fileAttachments.length;
+    if (remainingImageCount <= 0) {
+      showFeedback('图片数量已达上限', '图片和文件合计最多 5 个。');
       return;
     }
 
+    setImportingFile(true);
     try {
       const permission = await ImagePicker.requestMediaLibraryPermissionsAsync();
       if (!permission.granted) {
-        if (Platform.OS === 'web') window.alert('需要照片权限：允许 Sprout 访问照片后，才能为记录添加图片。');
-        else Alert.alert('需要照片权限', '允许 Sprout 访问照片后，才能为记录添加图片。');
+        showFeedback('需要照片权限', '允许 Sprout 访问照片后，才能为记录添加图片。');
         return;
       }
 
@@ -476,6 +607,7 @@ function HomeScreen() {
         quality: 0.85,
       });
       if (!result.canceled) {
+        if (result.assets.length > remainingImageCount) throw new Error('图片和文件合计最多 5 个。');
         const selectedImageUris = await Promise.all(
           result.assets.map(async ({ uri, fileName }) => {
             if (Platform.OS === 'web' || uri.startsWith('file://')) return uri;
@@ -488,12 +620,37 @@ function HomeScreen() {
             return cachedImage.uri;
           }),
         );
-        setImageUris((currentImageUris) => [...currentImageUris, ...selectedImageUris].slice(0, 9));
+        setImageUris((currentImageUris) => [...currentImageUris, ...selectedImageUris]);
       }
     } catch (error) {
       console.error('Failed to select memo image', error);
-      if (Platform.OS === 'web') window.alert('无法选择图片，请稍后重试。');
-      else Alert.alert('无法选择图片', '请稍后重试。');
+      showFeedback('无法选择图片', error instanceof Error ? error.message : '请稍后重试。');
+    } finally { setImportingFile(false); }
+  }
+
+  // REQ-064: docs/stories/v0.2.0/REQ-064-camera-capture.md
+  async function captureMemoPhoto() {
+    if (importingFile || savingMemo || imageUris.length + fileAttachments.length >= 5) return;
+    setImportingFile(true);
+    try {
+      const permission = await ImagePicker.requestCameraPermissionsAsync();
+      if (!permission.granted) {
+        showFeedback('需要相机权限', permission.canAskAgain
+          ? '允许 Sprout 使用相机后，才能拍照添加图片。'
+          : '请在系统设置中允许 Sprout 使用相机，然后重试。');
+        return;
+      }
+      const result = await ImagePicker.launchCameraAsync({
+        mediaTypes: ['images'], allowsEditing: false, quality: 0.85,
+      });
+      if (result.canceled) return;
+      const photoUri = result.assets[0]?.uri;
+      if (!photoUri) throw new Error('系统相机未返回照片，请重新拍摄。');
+      setImageUris((currentImageUris) => [...currentImageUris, photoUri]);
+    } catch (error) {
+      showFeedback('无法拍照', error instanceof Error ? error.message : '请稍后重试。');
+    } finally {
+      setImportingFile(false);
     }
   }
 
@@ -528,17 +685,30 @@ function HomeScreen() {
     Keyboard.dismiss();
     setQuery('');
     setSearchVisible(false);
+    setSearchFiltersOpen(false);
+    setSearchFilters(emptySearchFilters());
+  }
+
+  function openSearch() {
+    Keyboard.dismiss();
+    setQuery('');
+    setSearchFilters(emptySearchFilters());
+    setSearchVisible(true);
+    setSearchSort('created-desc');
   }
 
   function openComposer() {
+    if (showingHidden) return;
     setComposerOpen(true);
   }
 
   function closeComposer() {
-    if (savingMemo) return;
+    if (savingMemo || importingFile) return;
     Keyboard.dismiss();
     setContent('');
     setImageUris([]);
+    fileAttachments.forEach(discardImportedFile);
+    setFileAttachments([]);
     setComposerSelection({ start: 0, end: 0 });
     setComposerOpen(false);
   }
@@ -549,13 +719,15 @@ function HomeScreen() {
       return;
     }
 
-    const menuWidth = 132;
-    const screenMargin = 12;
-    setMemoMenuPosition({
-      left: Math.min(windowWidth - menuWidth - screenMargin, Math.max(screenMargin, event.nativeEvent.pageX - menuWidth)),
-      top: Math.min(windowHeight - 108, event.nativeEvent.pageY + 18),
+    // REQ-010: anchor to the button, never the finger's position within it.
+    event.currentTarget.measureInWindow((buttonLeft, buttonTop, buttonWidth, buttonHeight) => {
+      const screenMargin = 12;
+      setMemoMenuPosition({
+        left: Math.min(windowWidth - insets.right - memoMenuWidth - screenMargin, Math.max(insets.left + screenMargin, buttonLeft + buttonWidth - memoMenuWidth)),
+        top: Math.max(insets.top + screenMargin, Math.min(windowHeight - insets.bottom - memoMenuHeight - screenMargin, buttonTop + buttonHeight + 4)),
+      });
+      setOpenMemoMenuId(memoId);
     });
-    setOpenMemoMenuId(memoId);
   }
 
   function openFilterPanel() {
@@ -565,11 +737,18 @@ function HomeScreen() {
   }
 
   function openServerConnection() {
+    hiddenMemoSession.lock();
     setFilterOpen(false);
     router.push('/server-connection');
   }
 
   function selectTagAndCloseFilter(tag: string) {
+    // REQ-043: Sidebar tags always select ordinary memos and lock hidden access.
+    if (showingHidden) {
+      hiddenMemoSession.lock();
+      closeSearch();
+      setActiveDay(null);
+    }
     setActiveTag((currentTag) => (currentTag === tag ? null : tag));
     setFilterOpen(false);
   }
@@ -581,18 +760,40 @@ function HomeScreen() {
     setActiveDay(null);
   }
 
-  function clearFilters() {
+  // REQ-044: A cancelled or stale system prompt must never switch the list.
+  async function selectMemoVisibility(hidden: boolean) {
+    if (!hidden) hiddenMemoSession.lock();
+    else {
+      Keyboard.dismiss();
+      try {
+        const result = await hiddenMemoSession.unlock();
+        if (!result.success) {
+          if (!result.cancelled) {
+            showFeedback('无法解锁隐藏笔记', result.message);
+          }
+          return;
+        }
+      } catch (error) {
+        const message = error instanceof Error ? error.message : '生物识别验证异常，请稍后重试。';
+        showFeedback('无法解锁隐藏笔记', message);
+        return;
+      }
+    }
     setActiveDay(null);
     setActiveTag(null);
+    closeSearch();
+    setFilterOpen(false);
   }
 
   return (
     <SwipeSidebar
       open={filterOpen}
-      gesturesEnabled={windowWidth < 768 && !composerOpen}
+      gesturesEnabled={windowWidth < 768 && !composerOpen && !searchVisible}
       width={windowWidth * 0.8}
       onOpenChange={setFilterOpen}
       onEdgeBack={() => {
+        hiddenMemoSession.lock();
+        closeSearch();
         setActiveDay(null);
         setActiveTag(null);
         setVisibleYear(now.getFullYear());
@@ -603,6 +804,15 @@ function HomeScreen() {
               edges={['top', 'bottom']}
               style={[styles.drawerSafeArea, { backgroundColor: theme.surface, width: '100%' }]}>
               <ExploreFilterPanel
+                statisticsMemos={memos}
+                statisticsVisible={filterOpen}
+                onSelectDate={(date) => {
+                  setActiveDay(date?.getDate() ?? null);
+                  if (date) { setVisibleYear(date.getFullYear()); setVisibleMonth(date.getMonth()); }
+                }}
+                showingHidden={showingHidden}
+                authenticating={hiddenMemoAccess.authenticating}
+                onSelectVisibility={selectMemoVisibility}
                 activeDay={activeDay}
                 activeTag={activeTag}
                 connectionStatus={connectionStatus}
@@ -624,7 +834,7 @@ function HomeScreen() {
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
           style={styles.screen}>
           <View style={styles.contentColumn}>
-            <View style={styles.header}>
+            {!searchVisible && <View style={styles.header}>
               <View style={styles.brandGroup}>
                 <Pressable
                   accessibilityLabel="打开筛选侧栏"
@@ -640,10 +850,11 @@ function HomeScreen() {
                   />
                 </Pressable>
                 <ThemedText
-                  accessibilityLabel={activeTag ?? 'Sprout'}
+                  accessibilityLabel={refreshing ? '同步中' : activeTag ?? (showingHidden ? '隐藏笔记' : 'Sprout')}
+                  accessibilityLiveRegion="polite"
                   numberOfLines={1}
-                  style={[styles.wordmark, activeTag !== null && styles.tagViewTitle]}>
-                  {activeTag ?? 'Sprout\u00A0'}
+                  style={[styles.wordmark, (refreshing || activeTag !== null) && styles.tagViewTitle]}>
+                  {refreshing ? '同步中.' : activeTag ?? (showingHidden ? '隐藏笔记' : 'Sprout\u00A0')}
                 </ThemedText>
               </View>
               <View style={styles.headerActions}>
@@ -655,34 +866,17 @@ function HomeScreen() {
                     web: searchVisible ? 'close' : 'search',
                   }}
                   iconSource={require('@/assets/icons/search.svg')}
-                  onPress={() => (searchVisible ? closeSearch() : setSearchVisible(true))}
+                  onPress={openSearch}
                   selected={searchVisible}
                 />
               </View>
-            </View>
+            </View>}
 
             {searchVisible && (
-              <View style={[styles.searchField, { borderColor: theme.border, backgroundColor: theme.backgroundElement }]}>
-                <SymbolView
-                  name={{ ios: 'magnifyingglass', android: 'search', web: 'search' }}
-                  size={18}
-                  tintColor={theme.textSecondary}
-                />
-                <TextInput
-                  accessibilityLabel="搜索记录"
-                  autoFocus
-                  onChangeText={setQuery}
-                  placeholder="搜索内容或标签"
-                  placeholderTextColor={theme.textSecondary}
-                  returnKeyType="search"
-                  selectionColor={theme.accent}
-                  style={[styles.searchInput, { color: theme.text }]}
-                  value={query}
-                />
-              </View>
+              <MemoSearchHeader query={query} filters={searchFilters} onQueryChange={setQuery} onCancel={closeSearch} onOpenFilters={() => setSearchFiltersOpen(true)} onSubmit={() => { if (query.trim()) saveRecentSearch(query); }} />
             )}
           </View>
-          <GestureDetector gesture={refreshGesture}>
+          <GestureDetector gesture={Gesture.Simultaneous(refreshGesture, searchBackGesture)}>
           <View style={styles.refreshArea}>
           <Animated.View
               pointerEvents="none"
@@ -690,43 +884,34 @@ function HomeScreen() {
                 styles.refreshIndicator,
                 { opacity: pullOffset.interpolate({ inputRange: [20, 56], outputRange: [0, 1], extrapolate: 'clamp' }) },
               ]}>
-              <View style={[styles.refreshIndicatorBadge, { backgroundColor: theme.surface, borderColor: theme.border }]}>
-                <ActivityIndicator color={theme.accent} size="small" />
+              <View style={styles.refreshCountRow}>
+                <ThemedText style={styles.refreshCountNumber} themeColor="textSecondary">{filteredMemos.length}</ThemedText>
+                <ThemedText style={styles.refreshCountLabel} themeColor="textSecondary">条笔记</ThemedText>
               </View>
             </Animated.View>
           <GestureDetector gesture={scrollGesture}>
           <ScrollView
             style={styles.scrollView}
+            bounces={false}
             disableScrollViewPanResponder={Platform.OS === 'android'}
-            contentContainerStyle={styles.scrollContent}
+            contentContainerStyle={[styles.scrollContent, showingHidden && { paddingBottom: 24 }]}
             keyboardDismissMode="interactive"
             keyboardShouldPersistTaps="handled"
             onScroll={(event) => { scrollOffsetY.current = event.nativeEvent.contentOffset.y; }}
-            scrollEventThrottle={16}
-            refreshControl={Platform.OS === 'android' ? undefined : <RefreshControl refreshing={refreshing} onRefresh={refreshAndSync} />}>
+            scrollEventThrottle={16}>
           <Animated.View style={[styles.contentColumn, { transform: [{ translateY: pullOffset }] }]}>
-            {(activeDay !== null || activeTag !== null) && (
+            {searchVisible && !searchHasResults && <MemoSearchShortcuts onSelect={(shortcut) => setSearchFilters({ ...emptySearchFilters(), ...(shortcut === 'untagged' ? { tagRange: 'untagged' as const } : { contentRange: shortcut }) })} />}
+            {searchVisible && !searchHasResults && <MemoRecentSearches keywords={searchHistory.partition === searchPartition ? searchHistory.keywords : []} onSelect={(keyword) => { setQuery(keyword); Keyboard.dismiss(); saveRecentSearch(keyword); }} onClear={() => saveRecentSearch()} />}
+            {searchHasResults && <MemoSearchSummary count={filteredMemos.length} order={searchSort} onOrderChange={setSearchSort} />}
+            {!searchVisible && activeDay !== null && (
               <View style={styles.activeFilterRow}>
                 <ThemedText style={styles.activeFilterText} themeColor="textSecondary">
-                  {[
-                    activeDay !== null ? `${visibleMonth + 1} 月 ${activeDay} 日` : null,
-                    activeTag !== null ? `#${activeTag}` : null,
-                  ]
-                    .filter(Boolean)
-                    .join('  ')}
+                  {`${visibleMonth + 1} 月 ${activeDay} 日`}
                 </ThemedText>
-                <Pressable
-                  accessibilityLabel="清除全部筛选"
-                  accessibilityRole="button"
-                  hitSlop={8}
-                  onPress={clearFilters}
-                  style={({ pressed }) => [styles.clearFilterButton, pressed && styles.pressed]}>
-                  <ThemedText style={[styles.clearFilterLabel, { color: theme.accent }]}>清除</ThemedText>
-                </Pressable>
               </View>
             )}
 
-            {filteredMemos.length > 0 ? (
+            {searchVisible && !searchHasResults ? null : filteredMemos.length > 0 ? (
               <View style={styles.memoList}>
                 {filteredMemos.map((memo) => {
                   const isExpanded = expandedMemoIds.includes(memo.id);
@@ -753,8 +938,21 @@ function HomeScreen() {
                     {memo.content.length > 0 && <MemoContent content={memo.content} numberOfLines={canExpand && !isExpanded ? 3 : undefined} />}
                     <MemoImages
                       imageUris={memo.imageUris}
-                      onOpen={(index) => setImagePreview({ imageUris: memo.imageUris, index })}
+                      onOpen={(index) => {
+                        if (memo.hidden && !hiddenMemoSession.getSnapshot().unlocked) return;
+                        setImagePreview({ imageUris: memo.imageUris, index, hidden: Boolean(memo.hidden) });
+                      }}
                     />
+                    {memo.fileAttachments.map((attachment) => <Pressable key={attachment.id} accessibilityRole="button" accessibilityLabel={`文件操作 ${attachment.name}`} onPress={() => {
+                      if (memo.hidden && !hiddenMemoSession.getSnapshot().unlocked) return;
+                      setOpenMemoMenuId(null);
+                      setFileActionMemo({ ...memo, selectedFileId: attachment.id });
+                    }} style={({ pressed }) => [styles.memoFile, { borderColor: theme.fileBorder, backgroundColor: pressed ? theme.backgroundSelected : theme.fileBackground }]}>
+                      <View accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants">
+                        <FileTypeIcon name={attachment.name} />
+                      </View>
+                      <ThemedText numberOfLines={2} ellipsizeMode="middle" style={styles.memoFileName}>{attachment.name}</ThemedText>
+                    </Pressable>)}
                     {canExpand && (
                       <Pressable
                         accessibilityLabel={isExpanded ? '收起记录正文' : '展开记录正文'}
@@ -770,20 +968,20 @@ function HomeScreen() {
               </View>
             ) : (
               <View style={[styles.emptyState, { borderColor: theme.border }]}>
-                <ThemedText style={styles.emptyTitle}>{hasActiveConditions ? '没有找到记录' : '记下此刻的想法'}</ThemedText>
+                <ThemedText style={styles.emptyTitle}>{hasActiveConditions ? '没有找到记录' : showingHidden ? '没有隐藏笔记' : '记下此刻的想法'}</ThemedText>
                 <ThemedText style={styles.emptyBody} themeColor="textSecondary">
-                  {hasActiveConditions ? '换个关键词，或者清除筛选再看看。' : '一句话也值得留下。'}
+                  {hasActiveConditions ? searchVisible ? '换个关键词，或者清除筛选再看看。' : '打开侧栏，换个标签或日期再看看。' : showingHidden ? '隐藏的笔记会出现在这里。' : '一句话也值得留下。'}
                 </ThemedText>
-                <Pressable
+                {!searchVisible && !hasActiveConditions && <Pressable
                   accessibilityRole="button"
-                  onPress={hasActiveConditions ? () => { closeSearch(); clearFilters(); } : openComposer}
+                  onPress={showingHidden ? hiddenMemoSession.lock : openComposer}
                   style={({ pressed }) => [
                     styles.clearButton,
                     { borderColor: theme.border },
                     pressed && styles.pressed,
                   ]}>
-                  <ThemedText style={styles.clearLabel}>{hasActiveConditions ? '查看全部' : '开始记录'}</ThemedText>
-                </Pressable>
+                  <ThemedText style={styles.clearLabel}>{hasActiveConditions ? '清除筛选' : showingHidden ? '返回全部笔记' : '开始记录'}</ThemedText>
+                </Pressable>}
               </View>
             )}
           </Animated.View>
@@ -794,20 +992,25 @@ function HomeScreen() {
         </KeyboardAvoidingView>
       </BlurTargetView>
 
-      {!composerOpen && (
-        <View style={[styles.bottomEntryContainer, { backgroundColor: theme.background }]}>
+      {!showingHidden && !composerOpen && !searchVisible && (
+        <View style={[styles.bottomEntryContainer, { paddingBottom: insets.bottom + CAPTURE_ENTRY_BOTTOM_GAP }]}>
+          <CaptureBackdropFade color={theme.background} entryHeight={captureEntryHeight} />
           <Pressable
             accessibilityLabel="点击开始记录"
+            onLayout={(event) => setCaptureEntryHeight(event.nativeEvent.layout.height)}
             accessibilityRole="button"
             onPress={openComposer}
-            style={({ pressed }) => [styles.bottomEntry, { backgroundColor: theme.surface, borderColor: theme.border }, pressed && styles.pressed]}>
+            style={({ pressed }) => [styles.bottomEntry, theme === Colors.dark && styles.bottomEntryDark, { backgroundColor: theme.captureBackground, borderColor: theme.captureBorder }, pressed && styles.pressed]}>
             <SymbolView name={{ ios: 'plus', android: 'add', web: 'add' }} size={23} tintColor={theme.accent} />
-            <ThemedText style={styles.bottomEntryLabel} themeColor="textSecondary">记下此刻的想法…</ThemedText>
+            <ThemedText style={styles.bottomEntryLabel} themeColor="captureText">记下此刻的想法…</ThemedText>
           </Pressable>
         </View>
       )}
 
-      {composerOpen && (
+      {searchVisible && searchFiltersOpen && <MemoSearchFiltersSheet filters={searchFilters} availableTags={searchTags}
+        onCancel={() => setSearchFiltersOpen(false)} onApply={(filters) => { setSearchFilters(filters); setSearchFiltersOpen(false); }} />}
+
+      {!showingHidden && composerOpen && (
         <View style={[styles.composerModal, { bottom: keyboardHeight }]}>
           <BlurView
             blurTarget={composerBlurTarget}
@@ -815,38 +1018,12 @@ function HomeScreen() {
             intensity={70}
             pointerEvents="none"
             style={styles.composerBlur}
-            tint={theme.background === '#171815' ? 'dark' : 'light'}
+            tint={theme === Colors.dark ? 'dark' : 'light'}
           />
           <Pressable accessibilityLabel="关闭记录输入" accessibilityRole="button" onPress={closeComposer} style={styles.composerBackdrop} />
-          <View style={[styles.composerSheet, imageUris.length > 0 && { height: 184 + Math.ceil(imageUris.length / 3) * 68 }, { backgroundColor: theme.surface, borderColor: theme.border }]}>
-            {suggestedTags.length > 0 && (
-              <View
-                accessibilityLabel="历史标签候选"
-                style={[
-                  styles.tagSuggestionPopup,
-                  usesCompactComposer && styles.tagSuggestionPopupCompact,
-                  { backgroundColor: theme.surface, borderColor: theme.border },
-                ]}>
-                {suggestedTags.map(({ name }, index) => (
-                  <Pressable
-                    accessibilityLabel={`选择标签 ${name}`}
-                    accessibilityRole="button"
-                    key={name}
-                    onPress={() => selectSuggestedTag(name)}
-                    style={({ pressed }) => [
-                      styles.tagSuggestionRow,
-                      usesCompactComposer && styles.tagSuggestionRowCompact,
-                      index < suggestedTags.length - 1 && (usesCompactComposer
-                        ? { borderRightColor: theme.border, borderRightWidth: StyleSheet.hairlineWidth }
-                        : { borderBottomColor: theme.border, borderBottomWidth: StyleSheet.hairlineWidth }),
-                      pressed && { backgroundColor: theme.backgroundSelected },
-                    ]}>
-                    <ThemedText style={styles.tagSuggestionLabel}># {name}</ThemedText>
-                  </Pressable>
-                ))}
-              </View>
-            )}
+          <View ref={composerSheetRef} onLayout={(event) => setComposerWidth(event.nativeEvent.layout.width)} style={[styles.composerSheet, { height: Math.min(184 + Math.ceil(imageUris.length / 3) * 68 + fileAttachments.length * 76, Math.max(184, windowHeight - keyboardHeight - 80)) }, { backgroundColor: theme.surface, borderColor: theme.border }]}>
             <View style={[styles.sheetHandle, { backgroundColor: theme.border }]} />
+            <ScrollView style={styles.composerBody} keyboardShouldPersistTaps="handled" scrollEventThrottle={16} onScroll={(event) => setComposerScrollOffset(event.nativeEvent.contentOffset.y)}>
             <TextInput
               {...composerTextInputProps}
               ref={composerRef}
@@ -854,12 +1031,15 @@ function HomeScreen() {
               autoFocus
               cursorColor={theme.accent}
               multiline
+              editable={!savingMemo && !importingFile}
               onSubmitEditing={saveMemo}
               placeholder="现在的想法是..."
               placeholderTextColor={theme.textSecondary}
               selection={composerSelection}
               selectionColor={theme.accent}
-              style={[styles.composerInput, { color: theme.text }]}
+              onContentSizeChange={(event) => setComposerInputHeight(Math.max(72, Math.ceil(event.nativeEvent.contentSize.height)))}
+              scrollEnabled={false}
+              style={[styles.composerInput, { color: theme.text, height: composerInputHeight }]}
               textAlignVertical="top"
             />
             {imageUris.length > 0 && (
@@ -871,6 +1051,7 @@ function HomeScreen() {
                       accessibilityLabel={`移除第 ${index + 1} 张待添加图片`}
                       accessibilityRole="button"
                       hitSlop={8}
+                      disabled={savingMemo || importingFile}
                       onPress={() => setImageUris((currentImageUris) => currentImageUris.filter((_, imageIndex) => imageIndex !== index))}
                       style={({ pressed }) => [styles.removeImageButton, { backgroundColor: theme.backgroundSelected }, pressed && styles.pressed]}>
                       <SymbolView name={{ ios: 'xmark', android: 'close', web: 'close' }} size={16} tintColor={theme.text} />
@@ -879,32 +1060,57 @@ function HomeScreen() {
                 ))}
               </View>
             )}
+            {fileAttachments.map((attachment) => <FileAttachmentCard key={attachment.uri} attachment={attachment} onRemove={() => {
+              if (savingMemo || importingFile) return;
+              discardImportedFile(attachment);
+              setFileAttachments((files) => files.filter((file) => file.uri !== attachment.uri));
+            }} />)}
+            </ScrollView>
+            {suggestedTags.length > 0 && <CaretTagSuggestions content={content} cursor={composerSelection.start}
+              tags={suggestedTags.map(({ name }) => name)} onSelect={selectSuggestedTag}
+              inputRef={composerRef} viewportRef={composerSheetRef} padding={2} toolbarInset={72}
+              layoutKey={`${composerWidth}:${composerInputHeight}:${composerScrollOffset}:${keyboardHeight}:${imageUris.length}:${fileAttachments.length}`}
+              textStyle={styles.composerMeasurement} />}
             <View style={styles.composerActions}>
               <View style={styles.composerMediaActions}>
                 <IconButton
                   accessibilityLabel="添加标签"
                   icon={{ ios: 'tag', android: 'tag', web: 'tag' }}
+                  iconSource={require('@/assets/icons/tag.svg')}
+                  iconSourceSize={22}
                   onPress={addTagPrompt}
-                  tintColor={theme.text}
+                  tintColor={theme.textSecondary}
                   iconSize={18}
                   horizontalHitSlop={0}
                 />
                 <IconButton
-                  accessibilityLabel={`添加图片，已选${imageUris.length}张，最多9张`}
-                  disabled={imageUris.length >= 9}
+                  accessibilityLabel={`添加图片，附件已选${imageUris.length + fileAttachments.length}个，合计最多5个`}
+                  disabled={imageUris.length + fileAttachments.length >= 5 || importingFile || savingMemo}
                   icon={{ ios: 'photo', android: 'photo', web: 'photo' }}
                   iconSource={require('@/assets/icons/image-attachment.svg')}
                   onPress={chooseMemoImage}
-                  tintColor={theme.text}
+                  tintColor={theme.textSecondary}
                   iconSize={18}
-                  iconSourceSize={18}
+                  iconSourceSize={22}
+                  horizontalHitSlop={0}
                 />
+                {Platform.OS !== 'web' && <IconButton accessibilityLabel={importingFile ? '正在导入文件' : '添加文件'}
+                  disabled={importingFile || savingMemo || imageUris.length + fileAttachments.length >= 5}
+                  icon={{ ios: 'doc.badge.plus', android: 'attach_file', web: 'attach_file' }}
+                  iconSource={require('@/assets/icons/file-attachment.svg')} iconSourceSize={22} horizontalHitSlop={0}
+                  onPress={chooseMemoFile} tintColor={theme.textSecondary} iconSize={20} />}
+                {Platform.OS !== 'web' && <IconButton
+                  accessibilityLabel="拍照添加图片"
+                  disabled={importingFile || savingMemo || imageUris.length + fileAttachments.length >= 5}
+                  icon={{ ios: 'camera', android: 'photo_camera', web: 'photo_camera' }}
+                  iconSource={require('@/assets/icons/camera.svg')} iconSourceSize={22} horizontalHitSlop={0}
+                  onPress={captureMemoPhoto} tintColor={theme.textSecondary} iconSize={22} />}
               </View>
               <Pressable
                 accessibilityLabel="保存记录"
                 accessibilityRole="button"
                 accessibilityState={{ disabled: !canSave || savingMemo }}
-                disabled={!canSave || savingMemo}
+                disabled={!canSave || savingMemo || importingFile}
                 hitSlop={{ top: 4, bottom: 4 }}
                 onPress={saveMemo}
                 style={({ pressed }) => [
@@ -941,29 +1147,59 @@ function HomeScreen() {
             style={StyleSheet.absoluteFill}
           />
           {openMemoMenuId !== null && (() => {
-            const selectedMemo = memos.find((memo) => memo.id === openMemoMenuId);
+            const selectedMemo = visibleMemos.find((memo) => memo.id === openMemoMenuId);
             if (!selectedMemo) return null;
             return (
               <View
                 style={[
                   styles.memoMenu,
-                  memoMenuPosition,
-                  { backgroundColor: theme.surface, borderColor: theme.border },
+                  {
+                    left: Math.max(insets.left + 12, Math.min(memoMenuPosition.left, windowWidth - insets.right - memoMenuWidth - 12)),
+                    top: Math.max(insets.top + 12, Math.min(memoMenuPosition.top, windowHeight - insets.bottom - memoMenuHeight - 12)),
+                  },
+                  { width: memoMenuWidth, backgroundColor: theme.surface, borderColor: theme.border },
                 ]}>
                 <Pressable
                   accessibilityLabel="编辑记录"
                   accessibilityRole="button"
                   onPress={() => {
+                    if (selectedMemo.hidden && !hiddenMemoSession.getSnapshot().unlocked) return;
                     setOpenMemoMenuId(null);
-                    router.push({ pathname: '/memo/[id]', params: { id: selectedMemo.id, content: selectedMemo.content } });
+                    router.push({ pathname: '/memo/[id]', params: { id: selectedMemo.id } });
                   }}
                   style={({ pressed }) => [styles.memoMenuItem, pressed && styles.pressed]}>
+                  {/* REQ-010: compact outline pencil with the reference's short baseline. */}
+                  <Svg width={16} height={16} viewBox="0 0 24 24" accessible={false}>
+                    <Path d="m4 16-1 5 5-1L20 8a2.8 2.8 0 0 0-4-4L4 16Zm10-10 4 4M13 21h8" fill="none" stroke={theme.text} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
+                  </Svg>
                   <ThemedText style={styles.memoMenuLabel}>编辑</ThemedText>
+                </Pressable>
+                <Pressable
+                  accessibilityLabel={selectedMemo.hidden ? '取消隐藏笔记' : '隐藏笔记'}
+                  accessibilityRole="button"
+                  onPress={async () => {
+                    if (selectedMemo.hidden && !hiddenMemoSession.getSnapshot().unlocked) return;
+                    try {
+                      await setMemoHidden(selectedMemo.id, !selectedMemo.hidden);
+                      setMemos(await getMemos());
+                      setOpenMemoMenuId(null);
+                    } catch (error) {
+                      showStorageError('无法更新隐藏状态', error);
+                    }
+                  }}
+                  style={({ pressed }) => [styles.memoMenuItem, pressed && styles.pressed]}>
+                  <Svg width={16} height={16} viewBox="0 0 24 24" accessible={false}>
+                    <Path d={selectedMemo.hidden
+                      ? 'M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Zm13 0a3 3 0 1 1-6 0 3 3 0 0 1 6 0Z'
+                      : 'm3 3 18 18M10.5 5.1 12 5c6.5 0 10 7 10 7a20 20 0 0 1-3 3.8M6.1 6.1A20 20 0 0 0 2 12s3.5 7 10 7a11 11 0 0 0 5.9-1.9M9.9 9.9a3 3 0 0 0 4.2 4.2'} fill="none" stroke={theme.text} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
+                  </Svg>
+                  <ThemedText style={styles.memoMenuLabel}>{selectedMemo.hidden ? '取消隐藏' : '隐藏'}</ThemedText>
                 </Pressable>
                 <Pressable
                   accessibilityLabel="删除记录"
                   accessibilityRole="button"
                   onPress={async () => {
+                    if (selectedMemo.hidden && !hiddenMemoSession.getSnapshot().unlocked) return;
                     try {
                       await deleteMemo(selectedMemo.id);
                       setMemos(await getMemos());
@@ -973,6 +1209,9 @@ function HomeScreen() {
                     }
                   }}
                   style={({ pressed }) => [styles.memoMenuItem, pressed && styles.pressed]}>
+                  <Svg width={16} height={16} viewBox="0 0 24 24" accessible={false}>
+                    <Path d="M3 6h18M9 6V3h6v3M5 6l1 15h12l1-15M10 10v7M14 10v7" fill="none" stroke={theme.danger} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
+                  </Svg>
                   <ThemedText style={[styles.memoMenuLabel, { color: theme.danger }]}>删除</ThemedText>
                 </Pressable>
               </View>
@@ -986,8 +1225,8 @@ function HomeScreen() {
         onRequestClose={() => setImagePreview(undefined)}
         statusBarTranslucent
         transparent
-        visible={Boolean(imagePreview)}>
-        {imagePreview && (
+        visible={Boolean(imagePreview) && (!imagePreview?.hidden || hiddenMemoAccess.unlocked)}>
+        {imagePreview && (!imagePreview.hidden || hiddenMemoAccess.unlocked) && (
           <View style={styles.imagePreviewScreen}>
             <ScrollView
               contentOffset={{ x: imagePreview.index * windowWidth, y: 0 }}
@@ -1024,10 +1263,26 @@ function HomeScreen() {
         )}
       </Modal>
 
+      {fileActionMemo && fileActionAttachment && (!fileActionMemo.hidden || hiddenMemoAccess.unlocked) && <FileNameActions
+        key={fileActionAttachment.id} name={fileActionAttachment.name} onDismiss={() => setFileActionMemo(undefined)}
+        onOpen={() => {
+          if (fileActionMemo.hidden && !hiddenMemoSession.getSnapshot().unlocked) return;
+          setFileActionMemo(undefined);
+          void openFileAttachment(fileActionAttachment).catch((error) => {
+            showFeedback('无法查看文件', error instanceof Error ? error.message : '请安装兼容阅读器后重试。');
+          });
+        }}
+        onRename={async (stem) => {
+          if (fileActionMemo.hidden && !hiddenMemoSession.getSnapshot().unlocked) throw new Error('隐藏笔记已锁定。');
+          await renameMemoFile(fileActionMemo.id, fileActionAttachment.id, stem);
+          setMemos(await getMemos());
+        }} />}
+
       <FeedbackDialog
-        onDismiss={() => setSyncFeedback(undefined)}
-        title={syncFeedback ?? ''}
-        visible={syncFeedback !== undefined}
+        onDismiss={() => { if (feedback) setFeedback(undefined); else setSyncFeedback(undefined); }}
+        title={feedback?.title ?? syncFeedback ?? ''}
+        message={feedback?.message}
+        visible={feedback !== undefined || syncFeedback !== undefined}
       />
     </SafeAreaView>
     </SwipeSidebar>
@@ -1038,9 +1293,11 @@ const styles = StyleSheet.create({
   screen: { flex: 1 },
   refreshArea: { flex: 1, width: '100%' },
   refreshIndicator: { position: 'absolute', top: 12, left: 0, right: 0, alignItems: 'center' },
-  refreshIndicatorBadge: { width: 44, height: 44, borderRadius: 22, borderWidth: StyleSheet.hairlineWidth, alignItems: 'center', justifyContent: 'center', elevation: 2, shadowColor: '#000000', shadowOpacity: 0.08, shadowRadius: 6 },
+  refreshCountRow: { flexDirection: 'row', alignItems: 'baseline', gap: 6, paddingVertical: 8 },
+  refreshCountNumber: { fontSize: 14, lineHeight: 20, fontWeight: '700' },
+  refreshCountLabel: { fontSize: 14, lineHeight: 20, fontWeight: '400' },
   scrollView: { flex: 1, width: '100%' },
-  scrollContent: { width: '100%', alignItems: 'center', paddingBottom: Spacing.four },
+  scrollContent: { width: '100%', alignItems: 'center', paddingBottom: 144 },
   contentColumn: {
     width: '100%',
     maxWidth: MaxContentWidth,
@@ -1070,34 +1327,23 @@ const styles = StyleSheet.create({
   iconButtonStart: { alignItems: 'flex-start' },
   iconOpticalStart: { transform: [{ translateX: -3 }] },
   pressed: { opacity: 0.72 },
-  searchField: {
-    minHeight: 48,
-    borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 14,
-    flexDirection: 'row',
-    alignItems: 'center',
-    gap: Spacing.two,
-    paddingHorizontal: Spacing.three,
-    marginBottom: Spacing.three,
-  },
-  searchInput: { flex: 1, fontSize: 16, lineHeight: 22, paddingVertical: 10 },
   composerModal: { ...StyleSheet.absoluteFill, justifyContent: 'flex-end', alignItems: 'center', zIndex: 10 },
-  composerBlur: { ...StyleSheet.absoluteFill, bottom: 184 },
+  composerBlur: { ...StyleSheet.absoluteFill },
   composerBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0, 0, 0, 0.18)' },
   composerSheet: { width: '100%', maxWidth: MaxContentWidth, maxHeight: '55%', height: 184, alignSelf: 'center', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12, paddingTop: Spacing.two, paddingBottom: Spacing.four },
   sheetHandle: { width: 36, height: 4, borderRadius: 2, alignSelf: 'center', marginBottom: Spacing.two },
-  composerInput: { flex: 1, minHeight: 72, fontSize: 16, lineHeight: 24, fontWeight: '400', padding: 0, paddingTop: 2, paddingHorizontal: 2 },
-  tagSuggestionPopup: { position: 'absolute', zIndex: 3, left: Spacing.three, right: Spacing.three, maxWidth: MaxContentWidth - Spacing.six, alignSelf: 'center', bottom: 188, maxHeight: 220, overflow: 'hidden', borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, shadowColor: '#000', shadowOpacity: 0.2, shadowRadius: 16, shadowOffset: { width: 0, height: 6 }, elevation: 10 },
-  tagSuggestionPopupCompact: { bottom: 8, height: 44, flexDirection: 'row' },
-  tagSuggestionRow: { minHeight: 44, justifyContent: 'center', paddingHorizontal: Spacing.three, paddingVertical: Spacing.one },
-  tagSuggestionRowCompact: { flex: 1, minWidth: 0, paddingVertical: 0 },
-  tagSuggestionLabel: { fontSize: 15, lineHeight: 22, fontWeight: '400' },
+  composerMeasurement: { fontSize: 16, lineHeight: 24, fontWeight: '400', includeFontPadding: false },
+  composerBody: { flex: 1, minHeight: 0 },
+  composerInput: { includeFontPadding: false, minHeight: 72, fontSize: 16, lineHeight: 24, fontWeight: '400', padding: 0, paddingTop: 2, paddingHorizontal: 2 },
   composerActions: {
     flexShrink: 0,
     flexDirection: 'row',
     justifyContent: 'space-between',
     alignItems: 'center',
     marginTop: Spacing.two,
+    marginHorizontal: -12,
+    paddingHorizontal: 12,
+    paddingTop: 4,
   },
   composerMediaActions: { flexDirection: 'row', alignItems: 'center' },
   composerImageGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 4, marginTop: Spacing.one },
@@ -1105,9 +1351,11 @@ const styles = StyleSheet.create({
   composerImage: { width: '100%', height: '100%', borderRadius: 8 },
   removeImageButton: { position: 'absolute', top: -6, right: -6, width: 24, height: 24, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   composerSendButton: { width: 56, height: 48, borderRadius: 16, alignItems: 'center', justifyContent: 'center' },
-  bottomEntryContainer: { width: '100%', maxWidth: MaxContentWidth, alignSelf: 'center', paddingHorizontal: Spacing.three, paddingTop: Spacing.two, paddingBottom: Spacing.two },
-  bottomEntry: { minHeight: 56, borderWidth: StyleSheet.hairlineWidth, borderRadius: 16, paddingHorizontal: Spacing.three, flexDirection: 'row', alignItems: 'center', gap: Spacing.three, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 2 },
+  bottomEntryContainer: { position: 'absolute', bottom: 0, width: '100%', maxWidth: MaxContentWidth, alignSelf: 'center', paddingHorizontal: 24 },
+  // REQ-008: flomo reference baseline, 312 × 48 dp at a 360 dp viewport.
+  bottomEntry: { minHeight: 48, borderWidth: StyleSheet.hairlineWidth, borderRadius: 24, paddingHorizontal: Spacing.three, flexDirection: 'row', alignItems: 'center', gap: Spacing.three, shadowColor: '#000', shadowOpacity: 0.06, shadowRadius: 8, shadowOffset: { width: 0, height: 2 }, elevation: 2 },
   bottomEntryLabel: { fontSize: 16, lineHeight: 22, fontWeight: '500' },
+  bottomEntryDark: { shadowOpacity: 0.24, shadowRadius: 10, shadowOffset: { width: 0, height: 3 }, elevation: 4 },
   saveButton: {
     minHeight: 44,
     borderRadius: 12,
@@ -1118,7 +1366,6 @@ const styles = StyleSheet.create({
     paddingHorizontal: Spacing.three,
   },
   saveLabel: { fontSize: 14, lineHeight: 20, fontWeight: '700' },
-  clearFilterButton: { minWidth: 48, minHeight: 48, alignItems: 'center', justifyContent: 'center' },
   activeFilterRow: {
     minHeight: 32,
     marginBottom: Spacing.two,
@@ -1128,8 +1375,9 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   activeFilterText: { flex: 1, fontSize: 13, lineHeight: 18, fontWeight: '600' },
-  clearFilterLabel: { fontSize: 13, lineHeight: 18, fontWeight: '700' },
   memoList: { gap: 12 },
+  memoFile: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, marginTop: 8, padding: 12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12 },
+  memoFileName: { flex: 1, minWidth: 0, fontSize: 14, lineHeight: 21 },
   memo: {
     position: 'relative',
     borderWidth: StyleSheet.hairlineWidth,
@@ -1143,9 +1391,9 @@ const styles = StyleSheet.create({
   memoMetadata: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 6 },
   memoMenuButton: { width: 48, height: 48, marginVertical: -8, marginRight: -8, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   memoMenuModal: { flex: 1 },
-  memoMenu: { position: 'absolute', width: 132, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, paddingVertical: 4, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 5 },
-  memoMenuItem: { minHeight: 44, justifyContent: 'center', paddingHorizontal: 12 },
-  memoMenuLabel: { fontSize: 14, lineHeight: 20, fontWeight: '600' },
+  memoMenu: { position: 'absolute', flexDirection: 'row', gap: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, padding: 8, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 5 },
+  memoMenuItem: { flex: 1, minWidth: 48, minHeight: 56, alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 6, borderRadius: 8 },
+  memoMenuLabel: { fontSize: 14, lineHeight: 20, fontWeight: '600', textAlign: 'center' },
   memoTime: { flexShrink: 1, fontSize: 12, lineHeight: 18, fontWeight: '400' },
   memoContentFlow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', rowGap: 3 },
   memoContent: { flexShrink: 1, fontSize: 16, lineHeight: 24, fontWeight: '400' },
@@ -1159,7 +1407,7 @@ const styles = StyleSheet.create({
   imagePreviewCounter: { position: 'absolute', top: 58, alignSelf: 'center', color: '#FFFFFF', fontSize: 14, lineHeight: 20 },
   imagePreviewClose: { position: 'absolute', top: 44, right: 18, width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 24, backgroundColor: 'rgba(0, 0, 0, 0.42)' },
   inlineTagPill: { flexShrink: 0, marginHorizontal: 2, borderRadius: 6, paddingHorizontal: 4, paddingVertical: 1 },
-  inlineTag: { fontSize: 12, lineHeight: 15, fontWeight: '500' },
+  inlineTag: { fontSize: 12, lineHeight: 15, fontWeight: '400' },
   expandButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center' },
   expandLabel: { fontSize: 14, lineHeight: 20, fontWeight: '600' },
   emptyState: {

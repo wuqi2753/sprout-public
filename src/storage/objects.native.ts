@@ -28,12 +28,16 @@ export async function persistMemoImages(memoId: string, imageUris: string[]) {
     for (const [index, imageUri] of imageUris.entries()) {
       const objectName = createObjectName(index, imageUri);
       const objectFile = new File(memoObjectsDirectory, objectName);
-      await new File(imageUri).copy(objectFile);
       objectKeys.push(`${memoId}/${objectName}`);
+      await new File(imageUri).copy(objectFile);
     }
     return objectKeys;
   } catch (error) {
-    if (memoObjectsDirectory.exists) memoObjectsDirectory.delete();
+    // REQ-047: failed edits must not delete objects referenced by older operations.
+    for (const objectKey of objectKeys) {
+      const file = new File(resolveObjectUri(objectKey));
+      if (file.exists) file.delete();
+    }
     throw new Error(`Failed to persist images for memo ${memoId}`, { cause: error });
   }
 }
@@ -48,4 +52,11 @@ export function resolveObjectUri(objectKey: string) {
 export function deleteMemoObjects(memoId: string) {
   const memoObjectsDirectory = new Directory(objectsDirectory, memoId);
   if (memoObjectsDirectory.exists) memoObjectsDirectory.delete();
+}
+
+export function deleteObjectKeys(objectKeys: string[]) {
+  for (const objectKey of objectKeys) {
+    const file = new File(resolveObjectUri(objectKey));
+    if (file.exists) file.delete();
+  }
 }

@@ -7,7 +7,8 @@ import {
   TabListProps,
 } from 'expo-router/ui';
 import { SymbolView } from 'expo-symbols';
-import { useColorScheme, View, StyleSheet } from 'react-native';
+import { View, StyleSheet } from 'react-native';
+import { useColorScheme } from '@/hooks/use-color-scheme';
 
 import { Pressable } from '@/components/haptic-pressable';
 

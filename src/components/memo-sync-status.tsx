@@ -15,7 +15,7 @@ export function MemoSyncStatus({ synced }: MemoSyncStatusProps) {
   return (
     <View
       accessibilityLabel="未同步"
-      style={[styles.unsyncedBadge, { backgroundColor: theme.backgroundElement }]}>
+      style={[styles.unsyncedBadge, { backgroundColor: theme.unsyncedBackground }]}>
       <ThemedText style={styles.label} themeColor="textSecondary">
         未同步
       </ThemedText>

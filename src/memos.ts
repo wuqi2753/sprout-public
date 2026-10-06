@@ -9,3 +9,11 @@ export function formatMemoTime(date: Date) {
 export function extractTags(content: string) {
   return [...content.matchAll(/#([^\s#]+)/g)].map((match) => match[1]);
 }
+
+// REQ-009 / REQ-047: Share cursor-based tag matching between capture and editing.
+export function findTagDraft(content: string, cursorPosition: number) {
+  const contentBeforeCursor = content.slice(0, cursorPosition);
+  const match = contentBeforeCursor.match(/(^|\s)#([^\s#]*)$/);
+  if (!match) return null;
+  return { query: match[2], start: contentBeforeCursor.length - match[2].length - 1, end: cursorPosition };
+}

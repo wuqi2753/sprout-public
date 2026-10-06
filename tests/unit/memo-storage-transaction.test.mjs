@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+import { recordingStartModules } from '../fixtures/recording-start.mjs';
 
 function loadMemoStorage(database, deletedObjects) {
   const source = readFileSync(new URL('../../src/storage/memos.native.ts', import.meta.url), 'utf8');
@@ -11,6 +12,7 @@ function loadMemoStorage(database, deletedObjects) {
   }).outputText;
   const exports = {};
   const modules = {
+    ...recordingStartModules(),
     '@/storage/database.native': { getDatabase: async () => database },
     '@/storage/objects.native': {
       persistMemoImages: async () => [],
@@ -22,6 +24,8 @@ function loadMemoStorage(database, deletedObjects) {
   };
   const wrapped = vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})`);
   wrapped((specifier) => {
+    if (specifier === '@/storage/file-objects.native') return { persistMemoFile: async () => { throw new Error("Unexpected file persistence"); } };
+    if (specifier === '@/storage/file-attachment-rules') return {};
     if (!(specifier in modules)) throw new Error(`Unexpected module: ${specifier}`);
     return modules[specifier];
   }, { exports }, exports);
@@ -32,6 +36,14 @@ function createTransactionalDatabase(failOutboxInsert = false, initialMemos = []
   const state = { memos: structuredClone(initialMemos), images: structuredClone(initialImages), outbox: [] };
   return {
     state,
+    async getAllAsync(sql) {
+      if (sql.includes('FROM memos')) return state.memos.map((memo) => ({
+        ...memo, created_at: '2026-10-02T00:00:00.000Z', updated_at: '2026-10-02T00:00:00.000Z', hidden: 0, synced: 0,
+      }));
+      if (sql.includes('FROM memo_images')) return state.images.map((image) => ({ memo_id: image.memoId, object_key: image.objectKey }));
+      if (sql.includes('FROM memo_files')) return [];
+      throw new Error(`Unexpected read SQL: ${sql}`);
+    },
     async withExclusiveTransactionAsync(callback) {
       const snapshot = structuredClone(state);
       const transaction = {
@@ -46,6 +58,8 @@ function createTransactionalDatabase(failOutboxInsert = false, initialMemos = []
             const index = state.memos.findIndex((entry) => entry.id === parameters[0]);
             if (index < 0) return { changes: 0 };
             state.memos.splice(index, 1);
+          } else if (sql.startsWith('DELETE FROM memo_files')) {
+            return { changes: 0 };
           } else if (sql.startsWith('DELETE FROM memo_images')) {
             state.images = state.images.filter((entry) => entry.memoId !== parameters[0]);
           } else if (sql.includes('INSERT INTO memo_outbox')) {

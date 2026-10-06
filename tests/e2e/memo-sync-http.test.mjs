@@ -19,7 +19,61 @@ for (const name of ['server-connection', 'memo-sync']) {
   writeFileSync(join(compiledDirectory, `${name}.js`), compiled);
 }
 const { probeServerConnection } = require(join(compiledDirectory, 'server-connection.js'));
-const { getAppliedOperationVersion, sendMemoOperation, uploadMemoImage, MemoSyncError } = require(join(compiledDirectory, 'memo-sync.js'));
+const { getAppliedOperationVersion, sendMemoOperation, uploadMemoImage, uploadMemoFile, MemoSyncError } = require(join(compiledDirectory, 'memo-sync.js'));
+
+test('REQ-045 local HTTP redirects cannot forward authenticated requests', async (t) => {
+  let targetRequests = 0;
+  const server = createServer((request, response) => {
+    if (request.url === '/target') {
+      targetRequests++;
+      response.end(JSON.stringify({ status: 'ok', version: 1 }));
+      return;
+    }
+    response.writeHead(307, { Location: '/target' }).end();
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const config = { serverApiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: 'test' };
+  await assert.rejects(probeServerConnection(config));
+  await assert.rejects(sendMemoOperation(config, { operation: 'create', memoId: 'note', operationId: 'op' }));
+  assert.equal(targetRequests, 0);
+});
+
+test('REQ-041 mock file upload validates checksum metadata, reference and old Server retry', async (t) => {
+  const attachment = { id: 'file-memo:file', name: '账单.pdf', media_type: 'application/pdf', size: 5, sha256: 'a'.repeat(64) };
+  let uploaded = false;
+  let mode = 'valid';
+  const server = createServer(async (request, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    if (request.method === 'PUT') {
+      if (mode === 'old') { response.writeHead(404).end('{}'); return; }
+      assert.equal(request.headers.authorization, 'Bearer file-key');
+      assert.equal(decodeURIComponent(request.headers['x-file-name']), attachment.name);
+      assert.equal(request.headers['x-file-sha256'], attachment.sha256);
+      assert.equal(Buffer.concat(chunks).toString(), '%PDF-');
+      uploaded = true;
+      response.writeHead(201).end(JSON.stringify({ ...attachment, size: mode === 'bad' ? 6 : 5 }));
+    } else {
+      assert.ok(uploaded);
+      assert.deepEqual(JSON.parse(Buffer.concat(chunks)).files, [attachment.id]);
+      response.writeHead(201).end(JSON.stringify({ version: 1, files: [attachment.id], images: [] }));
+    }
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => server.close());
+  const config = { serverApiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: 'file-key' };
+  const bytes = new TextEncoder().encode('%PDF-').buffer;
+  await uploadMemoFile(config, attachment, bytes);
+  assert.equal(await sendMemoOperation(config, { operationId: 'op', memoId: 'file-memo', operation: 'create', content: '', files: [attachment.id] }), 1);
+  mode = 'bad';
+  await assert.rejects(uploadMemoFile(config, attachment, bytes), /metadata/);
+  mode = 'old';
+  await assert.rejects(uploadMemoFile(config, attachment, bytes), { retryable: true, statusCode: 404 });
+});
 
 test('image upload sends authenticated binary data before an image note references it', async (t) => {
   const memoId = '018f4b64-8be1-7ee2-b608-9d26c750f57a';

@@ -35,7 +35,9 @@ const (
 
 var uuidPattern = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[1-8][0-9a-fA-F]{3}-[89abAB][0-9a-fA-F]{3}-[0-9a-fA-F]{12}$`)
 var noteIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
-var imageIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}:[0-8]$`)
+
+// REQ-048: revisions preserve immutable bytes when editor attachments change.
+var imageIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})?:[0-8]$`)
 
 type serverConfig struct{ listenAddress, apiKey, databasePath string }
 type jsonResponse struct {
@@ -54,13 +56,15 @@ type apiErrorBody struct {
 	Message string `json:"message"`
 }
 type note struct {
-	NoteID    string   `json:"note_id"`
-	Content   string   `json:"content"`
-	Images    []string `json:"images"`
-	Version   int64    `json:"version"`
-	CreatedAt string   `json:"created_at"`
-	UpdatedAt string   `json:"updated_at"`
-	DeletedAt *string  `json:"deleted_at"`
+	NoteID          string         `json:"note_id"`
+	Content         string         `json:"content"`
+	Images          []string       `json:"images"`
+	Files           []string       `json:"files"`
+	FileAttachments []fileMetadata `json:"file_attachments"`
+	Version         int64          `json:"version"`
+	CreatedAt       string         `json:"created_at"`
+	UpdatedAt       string         `json:"updated_at"`
+	DeletedAt       *string        `json:"deleted_at"`
 }
 type operationStatus struct {
 	OperationID   string `json:"operation_id"`
@@ -74,11 +78,13 @@ type createNoteRequest struct {
 	NoteID    string   `json:"note_id"`
 	Content   string   `json:"content"`
 	Images    []string `json:"images"`
+	Files     []string `json:"files"`
 	CreatedAt string   `json:"created_at"`
 }
 type updateNoteRequest struct {
 	Content     string    `json:"content"`
 	Images      *[]string `json:"images"`
+	Files       *[]string `json:"files"`
 	BaseVersion int64     `json:"base_version"`
 }
 type deleteNoteRequest struct {
@@ -90,8 +96,9 @@ type storedOperation struct {
 	responseBody []byte
 }
 type noteStore struct {
-	database *sql.DB
-	now      func() time.Time
+	database         *sql.DB
+	now              func() time.Time
+	objectsDirectory string
 }
 
 func loadConfig(getenv func(string) string) (serverConfig, error) {
@@ -152,7 +159,11 @@ func openNoteStore(databasePath string) (store *noteStore, initializationError e
 	if err = transaction.Commit(); err != nil {
 		return nil, fmt.Errorf("commit SQLite schema initialization: %w", err)
 	}
-	return &noteStore{database: database, now: time.Now}, nil
+	store = &noteStore{database: database, now: time.Now}
+	if err := store.initializeFileObjects(databasePath); err != nil {
+		return nil, err
+	}
+	return store, nil
 }
 func (store *noteStore) close() error { return store.database.Close() }
 
@@ -241,6 +252,7 @@ func newHandler(apiKey string, store *noteStore) http.Handler {
 			writeAPIError(w, 405, "method_not_allowed", "method is not allowed")
 		}
 	})
+	store.registerFileRoutes(mux, apiKey)
 	return mux
 }
 
@@ -269,12 +281,22 @@ func handlePutImage(w http.ResponseWriter, r *http.Request, store *noteStore, id
 	}
 	digest := sha256.Sum256(bytes)
 	hash := hex.EncodeToString(digest[:])
-	result, err := store.database.ExecContext(r.Context(), `INSERT INTO image_objects(image_id,media_type,sha256,bytes) VALUES(?,?,?,?) ON CONFLICT(image_id) DO NOTHING`, id, mediaType, hash, bytes)
+	objectKey, err := store.writeObject(id, hash, bytes)
+	if err != nil {
+		writeAPIError(w, 500, "object_storage_error", "failed to save image file")
+		return
+	}
+	result, err := store.database.ExecContext(r.Context(), `INSERT INTO image_objects(image_id,media_type,sha256,bytes,object_key,size) VALUES(?,?,?,X'',?,?) ON CONFLICT(image_id) DO NOTHING`, id, mediaType, hash, objectKey, len(bytes))
 	if err != nil {
 		writeAPIError(w, 500, "database_error", "failed to save image")
 		return
 	}
-	if changed, _ := result.RowsAffected(); changed == 0 {
+	changed, err := result.RowsAffected()
+	if err != nil {
+		writeAPIError(w, 500, "database_error", "failed to confirm image write")
+		return
+	}
+	if changed == 0 {
 		var storedType, storedHash string
 		if err := store.database.QueryRowContext(r.Context(), `SELECT media_type,sha256 FROM image_objects WHERE image_id=?`, id).Scan(&storedType, &storedHash); err != nil {
 			writeAPIError(w, 500, "database_error", "failed to read image")
@@ -308,8 +330,8 @@ func matchesImageMediaType(mediaType string, body []byte) bool {
 
 func handleGetImage(w http.ResponseWriter, r *http.Request, store *noteStore, id string) {
 	var mediaType string
-	var bytes []byte
-	err := store.database.QueryRowContext(r.Context(), `SELECT media_type,bytes FROM image_objects WHERE image_id=?`, id).Scan(&mediaType, &bytes)
+	var objectKey string
+	err := store.database.QueryRowContext(r.Context(), `SELECT media_type,object_key FROM image_objects WHERE image_id=?`, id).Scan(&mediaType, &objectKey)
 	if errors.Is(err, sql.ErrNoRows) {
 		writeAPIError(w, 404, "image_not_found", "image does not exist")
 		return
@@ -318,12 +340,7 @@ func handleGetImage(w http.ResponseWriter, r *http.Request, store *noteStore, id
 		writeAPIError(w, 500, "database_error", "failed to read image")
 		return
 	}
-	w.Header().Set("Content-Type", mediaType)
-	w.Header().Set("Cache-Control", "no-store")
-	w.WriteHeader(200)
-	if _, err := w.Write(bytes); err != nil {
-		log.Printf("write image: %v", err)
-	}
+	store.serveObject(w, r, objectKey, mediaType, "")
 }
 func authenticate(r *http.Request, key string) bool {
 	got, ok := strings.CutPrefix(r.Header.Get("Authorization"), "Bearer ")
@@ -340,12 +357,20 @@ func handleCreateNote(w http.ResponseWriter, r *http.Request, store *noteStore) 
 		writeAPIError(w, 400, "invalid_note_id", "note_id has an invalid format")
 		return
 	}
-	if input.Content == "" && len(input.Images) == 0 {
+	if input.Content == "" && len(input.Images) == 0 && len(input.Files) == 0 {
 		writeAPIError(w, 400, "invalid_content", "content or images must be present")
 		return
 	}
 	if !validNoteImageIDs(input.NoteID, input.Images) {
 		writeAPIError(w, 400, "invalid_images", "images must contain unique valid IDs")
+		return
+	}
+	if len(input.Images)+len(input.Files) > 5 {
+		writeAPIError(w, 400, "too_many_attachments", "images and files combined must not exceed 5")
+		return
+	}
+	if !validNoteFiles(input.NoteID, input.Files, input.Images) {
+		writeAPIError(w, 400, "invalid_files", "files must contain unique valid IDs belonging to this note")
 		return
 	}
 	createdAt, err := time.Parse(time.RFC3339, input.CreatedAt)
@@ -373,7 +398,17 @@ func handleCreateNote(w http.ResponseWriter, r *http.Request, store *noteStore) 
 			}
 			return 0, nil, 0, err
 		}
-		return jsonResult(201, note{NoteID: input.NoteID, Content: input.Content, Images: nonNilImages(input.Images), Version: 1, CreatedAt: stamp, UpdatedAt: stamp}, 1)
+		if err := replaceNoteFiles(r.Context(), tx, input.NoteID, input.Files); err != nil {
+			if errors.Is(err, errFileNotFound) {
+				return apiErrorResult(400, "file_not_found", "referenced file has not been uploaded")
+			}
+			return 0, nil, 0, err
+		}
+		n, err := getNoteWithQuery(r.Context(), tx, input.NoteID)
+		if err != nil {
+			return 0, nil, 0, err
+		}
+		return jsonResult(201, n, 1)
 	})
 	writeMutationResult(w, code, response, err)
 }
@@ -396,7 +431,7 @@ func handleUpdateNote(w http.ResponseWriter, r *http.Request, store *noteStore, 
 		return
 	}
 	input.Content = strings.TrimSpace(input.Content)
-	if input.BaseVersion < 1 || (input.Images != nil && input.Content == "" && len(*input.Images) == 0) {
+	if input.BaseVersion < 1 {
 		writeAPIError(w, 400, "invalid_request", "base_version must be positive and content or images must be present")
 		return
 	}
@@ -425,8 +460,25 @@ func handleUpdateNote(w http.ResponseWriter, r *http.Request, store *noteStore, 
 		if input.Images != nil {
 			n.Images = nonNilImages(*input.Images)
 		}
-		if input.Content == "" && len(n.Images) == 0 {
+		if input.Files != nil {
+			n.Files = nonNilImages(*input.Files)
+		}
+		if len(n.Images)+len(n.Files) > 5 {
+			return apiErrorResult(400, "too_many_attachments", "images and files combined must not exceed 5")
+		}
+		if !validNoteFiles(id, n.Files, n.Images) {
+			return apiErrorResult(400, "invalid_files", "files must contain unique valid IDs belonging to this note")
+		}
+		if input.Content == "" && len(n.Images) == 0 && len(n.Files) == 0 {
 			return apiErrorResult(400, "invalid_content", "content or images must be present")
+		}
+		if input.Files != nil {
+			if err := replaceNoteFiles(r.Context(), tx, id, n.Files); err != nil {
+				if errors.Is(err, errFileNotFound) {
+					return apiErrorResult(400, "file_not_found", "referenced file has not been uploaded")
+				}
+				return 0, nil, 0, err
+			}
 		}
 		if input.Images != nil {
 			if err := replaceNoteImages(r.Context(), tx, id, n.Images); err != nil {
@@ -440,6 +492,10 @@ func handleUpdateNote(w http.ResponseWriter, r *http.Request, store *noteStore, 
 		n.Version++
 		n.UpdatedAt = stamp
 		if _, err = tx.ExecContext(r.Context(), `UPDATE notes SET content=?,version=?,updated_at=? WHERE note_id=?`, n.Content, n.Version, stamp, id); err != nil {
+			return 0, nil, 0, err
+		}
+		n, err = getNoteWithQuery(r.Context(), tx, id)
+		if err != nil {
 			return 0, nil, 0, err
 		}
 		return jsonResult(200, n, n.Version)
@@ -569,7 +625,10 @@ func getNoteWithQuery(ctx context.Context, q rowQueryer, id string) (note, error
 	if err != nil {
 		return note{}, err
 	}
-	if !noteIDPattern.MatchString(n.NoteID) || (strings.TrimSpace(n.Content) == "" && len(n.Images) == 0) || !validNoteImageIDs(n.NoteID, n.Images) || n.Version < 1 || !validTimestamp(n.CreatedAt) || !validTimestamp(n.UpdatedAt) || (n.DeletedAt != nil && !validTimestamp(*n.DeletedAt)) {
+	if err := readNoteFiles(ctx, q, &n); err != nil {
+		return note{}, err
+	}
+	if !noteIDPattern.MatchString(n.NoteID) || (strings.TrimSpace(n.Content) == "" && len(n.Images) == 0 && len(n.Files) == 0) || !validNoteFiles(n.NoteID, n.Files, n.Images) || !validNoteImageIDs(n.NoteID, n.Images) || n.Version < 1 || !validTimestamp(n.CreatedAt) || !validTimestamp(n.UpdatedAt) || (n.DeletedAt != nil && !validTimestamp(*n.DeletedAt)) {
 		return note{}, errors.New("stored note has invalid fields")
 	}
 	return n, nil

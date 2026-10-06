@@ -11,6 +11,7 @@ function loadOutbox(database, config) {
   }).outputText;
   const exports = {};
   const modules = {
+    '@/storage/file-objects.native': {},
     '@/api/memo-sync': {},
     'expo-file-system': {},
     '@/storage/database.native': { getDatabase: async () => database },

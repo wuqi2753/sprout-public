@@ -30,6 +30,18 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase) {
       UNIQUE (memo_id, position)
     );
     CREATE INDEX IF NOT EXISTS memo_images_memo_id_index ON memo_images(memo_id);
+    CREATE TABLE IF NOT EXISTS memo_files (
+      id TEXT PRIMARY KEY NOT NULL,
+      memo_id TEXT NOT NULL,
+      object_key TEXT NOT NULL UNIQUE,
+      name TEXT NOT NULL,
+      media_type TEXT NOT NULL,
+      size INTEGER NOT NULL CHECK(size > 0 AND size <= 20971520),
+      sha256 TEXT NOT NULL,
+      position INTEGER NOT NULL CHECK(position >= 0),
+      UNIQUE(memo_id, position),
+      FOREIGN KEY(memo_id) REFERENCES memos(id) ON DELETE CASCADE
+    );
     CREATE TABLE IF NOT EXISTS memo_outbox (
       operation_id TEXT PRIMARY KEY NOT NULL,
       memo_id TEXT NOT NULL,
@@ -48,6 +60,28 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase) {
     WHERE NOT EXISTS (SELECT 1 FROM memos WHERE memos.id = memo_images.memo_id);
   `);
   const memoColumns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(memos)');
+  // REQ-052: retain legacy single-file rows and queued snapshots during migration.
+  const fileColumns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(memo_files)');
+  if (!fileColumns.some((column) => column.name === 'position')) {
+    await database.withExclusiveTransactionAsync(async (transaction) => {
+      await transaction.execAsync(`
+        ALTER TABLE memo_files RENAME TO memo_files_single;
+        CREATE TABLE memo_files (
+          id TEXT PRIMARY KEY NOT NULL, memo_id TEXT NOT NULL,
+          object_key TEXT NOT NULL UNIQUE, name TEXT NOT NULL, media_type TEXT NOT NULL,
+          size INTEGER NOT NULL CHECK(size > 0 AND size <= 20971520), sha256 TEXT NOT NULL,
+          position INTEGER NOT NULL CHECK(position >= 0), UNIQUE(memo_id, position),
+          FOREIGN KEY(memo_id) REFERENCES memos(id) ON DELETE CASCADE
+        );
+        INSERT INTO memo_files SELECT id, memo_id, object_key, name, media_type, size, sha256, 0 FROM memo_files_single;
+        DROP TABLE memo_files_single;
+      `);
+    });
+  }
+  // REQ-043: Local visibility, independent of the Server and Outbox.
+  if (!memoColumns.some((column) => column.name === 'hidden')) {
+    await database.execAsync('ALTER TABLE memos ADD COLUMN hidden INTEGER NOT NULL DEFAULT 0 CHECK (hidden IN (0, 1))');
+  }
   if (!memoColumns.some((column) => column.name === 'server_version')) {
     await database.execAsync('ALTER TABLE memos ADD COLUMN server_version INTEGER');
   }

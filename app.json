@@ -2,42 +2,76 @@
   "expo": {
     "name": "Sprout",
     "slug": "sprout",
-    "version": "1.1.2",
+    "version": "1.3.0",
     "orientation": "default",
-    "icon": "./assets/images/sprout-icon-cartoon-adaptive.png",
+    "icon": "./assets/images/sprout-icon-flame.png",
     "scheme": "nativeinstant",
     "userInterfaceStyle": "automatic",
     "ios": {
-      "icon": "./assets/images/sprout-icon-cartoon-adaptive.png",
-      "buildNumber": "4"
+      "icon": "./assets/images/sprout-icon-flame.png",
+      "buildNumber": "6",
+      "bundleIdentifier": "com.nativeinstant.app"
     },
     "android": {
       "package": "com.nativeinstant.app",
-      "versionCode": 4,
+      "versionCode": 6,
       "adaptiveIcon": {
-        "backgroundColor": "#F8F8F6",
-        "foregroundImage": "./assets/images/sprout-icon-cartoon-adaptive.png"
+        "backgroundColor": "#262624",
+        "foregroundImage": "./assets/images/sprout-icon-flame.png"
       },
       "predictiveBackGestureEnabled": false
     },
     "web": {
       "output": "static",
-      "favicon": "./assets/images/sprout-icon-cartoon-adaptive.png"
+      "favicon": "./assets/images/sprout-icon-flame.png"
     },
     "plugins": [
       "expo-router",
       [
+        "expo-local-authentication",
+        {
+          "faceIDPermission": "允许 Sprout 使用面容识别验证身份，以查看隐藏笔记。"
+        }
+      ],
+      [
         "expo-image-picker",
         {
-          "photosPermission": "允许 Sprout 访问照片，以便为记录添加图片。"
+          "photosPermission": "允许 Sprout 访问照片，以便为记录添加图片。",
+          "cameraPermission": "允许 Sprout 使用相机，以便拍照并为记录添加图片。",
+          "microphonePermission": false
         }
       ],
       [
         "expo-splash-screen",
         {
-          "backgroundColor": "#F8F8F6",
-          "image": "./assets/images/sprout-icon-cartoon-adaptive.png",
+          "backgroundColor": "#262624",
+          "image": "./assets/images/sprout-icon-flame.png",
           "imageWidth": 76
+        }
+      ],
+      [
+        "expo-sharing",
+        {
+          "ios": {
+            "enabled": true,
+            "activationRule": {
+              "supportsFileWithMaxCount": 1
+            }
+          },
+          "android": {
+            "enabled": true,
+            "singleShareMimeTypes": [
+              "application/pdf",
+              "application/vnd.ms-excel",
+              "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+              "text/csv",
+              "text/comma-separated-values",
+              "application/octet-stream"
+            ],
+            "multipleShareMimeTypes": [
+              "*/*"
+            ]
+          }
         }
       ]
     ],

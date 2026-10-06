@@ -1,9 +1,10 @@
-import { getAppliedOperationVersion, MemoSyncError, sendMemoOperation, uploadMemoImage } from '@/api/memo-sync';
+import { getAppliedOperationVersion, MemoSyncError, sendMemoOperation, uploadMemoImage, uploadMemoFile } from '@/api/memo-sync';
 import { File } from 'expo-file-system';
 import { getDatabase } from '@/storage/database.native';
 import { deleteMemoObjects, resolveObjectUri } from '@/storage/objects.native';
 import { getServerConnectionConfig } from '@/storage/server-connection';
 import { synchronizeMemoOutbox, type MemoOperationRequest, type OutboxRow } from '@/sync/memo-outbox-core';
+import { hashFileBytes } from '@/storage/file-objects.native';
 
 type DatabaseOutboxRow = {
   operation_id: string;
@@ -28,6 +29,18 @@ function imageMediaType(uri: string) {
 }
 
 async function sendMemoWithImages(config: NonNullable<Awaited<ReturnType<typeof getServerConnectionConfig>>>, operation: MemoOperationRequest) {
+  for (const fileId of operation.files ?? []) {
+    const metadata = operation.fileObjects?.find((file) => file.id === fileId);
+    if (!metadata) throw new MemoSyncError(false, undefined, 'Missing local file metadata');
+    const file = new File(resolveObjectUri(metadata.object_key));
+    if (!file.exists) throw new MemoSyncError(false, undefined, 'Missing local attachment file');
+    const bytes = await file.arrayBuffer();
+    if (bytes.byteLength !== metadata.size || await hashFileBytes(bytes) !== metadata.sha256) {
+      throw new MemoSyncError(false, undefined, 'Local file no longer matches its saved checksum');
+    }
+    const { object_key: _objectKey, ...attachment } = metadata;
+    await uploadMemoFile(config, attachment, bytes);
+  }
   if (operation.images) {
     const database = await getDatabase();
     for (const imageId of operation.images) {
@@ -103,6 +116,7 @@ async function synchronizePendingMemos() {
      SET state = 'pending', next_attempt_at = NULL, last_error = NULL
      WHERE state = 'permanent_failed' AND last_error IN ('invalid_api_key', 'http_401')`,
   );
+  const failures: string[] = [];
   await synchronizeMemoOutbox({
     recoverSendingOperations: async () => {
       await database.runAsync(`UPDATE memo_outbox SET state = 'pending' WHERE state = 'sending'`);
@@ -139,12 +153,16 @@ async function synchronizePendingMemos() {
       getAppliedOperationVersion(config, operationId, { memoId, operation }),
     sendMemoOperation: (operation) => sendMemoWithImages(config, operation),
     markAcknowledged,
-    markFailed: (row, failure) => markFailed(row, failure.retryable, failure.message),
+    markFailed: async (row, failure) => {
+      failures.push(failure.message);
+      await markFailed(row, failure.retryable, failure.message);
+    },
     classifyFailure: (error) => ({
       retryable: error instanceof MemoSyncError ? error.retryable : true,
       message: error instanceof Error ? error.message : 'unknown_sync_error',
     }),
   });
+  if (failures.length) throw new Error(`同步未完成：${failures[0]}`);
 }
 
 export function syncMemoOutbox() {
