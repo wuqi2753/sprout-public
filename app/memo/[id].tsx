@@ -57,7 +57,7 @@ export default function EditMemoScreen() {
   const editorBodyRef = useRef<View>(null);
   const [editorScrollOffset, setEditorScrollOffset] = useState(0);
   const [editorWidth, setEditorWidth] = useState(0);
-  const [feedback, setFeedback] = useState<{ title: string; message?: string; confirmDeletion?: boolean }>();
+  const [feedback, setFeedback] = useState<{ title: string; message?: string }>();
   const importedFilesRef = useRef<FileAttachment[]>([]);
   const activeRef = useRef(true);
   const deletingRef = useRef(false);
@@ -174,12 +174,6 @@ export default function EditMemoScreen() {
       requestAnimationFrame(() => router.back());
     } catch (error) { showEditError('无法删除记录', error); }
     finally { deletingRef.current = false; setSaving(false); }
-  }
-
-  function confirmDeletion() {
-    if (!canChangeDraft()) return;
-    setMenuOpen(false);
-    setFeedback({ title: '删除这条笔记？', message: '删除后无法恢复。', confirmDeletion: true });
   }
 
   function canChangeDraft() {
@@ -379,17 +373,13 @@ export default function EditMemoScreen() {
             <ThemedText style={styles.menuLabel}>复制全文</ThemedText>
           </Pressable>
           <View style={{ height: StyleSheet.hairlineWidth, backgroundColor: theme.border }} />
-          <Pressable accessibilityRole="button" accessibilityLabel="删除记录" onPress={confirmDeletion} disabled={saving} style={styles.menuItem}>
+          <Pressable accessibilityRole="button" accessibilityLabel="删除记录" onPress={() => void deleteEditedMemo()} disabled={saving} style={styles.menuItem}>
             <ThemedText style={[styles.menuLabel, { color: theme.danger }]}>删除</ThemedText>
           </Pressable>
         </View>
       </View>}
       <FeedbackDialog visible={feedback !== undefined} title={feedback?.title ?? ''} message={feedback?.message}
-        onDismiss={() => setFeedback(undefined)}
-        destructiveAction={feedback?.confirmDeletion ? { label: '删除', onPress: () => {
-          setFeedback(undefined);
-          void deleteEditedMemo();
-        } } : undefined} />
+        onDismiss={() => setFeedback(undefined)} />
     </SafeAreaView>
   );
 }

@@ -5,6 +5,7 @@ import { rememberRecordingStart } from '@/storage/recording-start';
 import { earliestRecordingDate } from '@/storage/memo-statistics-rules';
 
 let browserMemos: Memo[] = [];
+let browserTrash: Memo[] = [];
 let welcomeMemoInitialized = false;
 
 // REQ-039: Browser preview follows the same once-per-local-data behavior.
@@ -24,6 +25,8 @@ export async function getMemos() {
 export async function getMemo(id: string) {
   return browserMemos.find((memo) => memo.id === id);
 }
+
+export async function getTrashMemos() { return browserTrash; }
 
 // REQ-043: Browser preview keeps visibility in memory, like its memo content.
 export async function setMemoHidden(id: string, hidden: boolean) {
@@ -65,8 +68,24 @@ export async function updateMemoContent(id: string, content: string, savedAt: Da
 export async function deleteMemo(id: string) {
   await getMemos();
   if (!browserMemos.some((memo) => memo.id === id)) throw new Error(`Cannot delete missing memo: ${id}`);
-  browserMemos = browserMemos.filter((memo) => memo.id !== id);
+  const memo = browserMemos.find((entry) => entry.id === id)!;
+  browserMemos = browserMemos.filter((entry) => entry.id !== id);
+  if (!memo.hidden) browserTrash = [{ ...memo, deletedAt: new Date() }, ...browserTrash];
 }
+
+export async function restoreMemo(id: string) {
+  const memo = browserTrash.find((entry) => entry.id === id);
+  if (!memo) throw new Error(`Cannot restore missing trash memo: ${id}`);
+  browserTrash = browserTrash.filter((entry) => entry.id !== id);
+  browserMemos = [{ ...memo, deletedAt: undefined, expiresAt: undefined }, ...browserMemos];
+}
+
+export async function purgeMemo(id: string) {
+  if (!browserTrash.some((entry) => entry.id === id)) throw new Error(`Cannot purge missing trash memo: ${id}`);
+  browserTrash = browserTrash.filter((entry) => entry.id !== id);
+}
+
+export async function clearTrashMemos() { browserTrash = []; }
 
 // REQ-047: browser preview supports the same draft save/cancel boundary.
 // REQ-049: ordinary file persistence is available in the native App only.

@@ -3,7 +3,7 @@ import { normalizeServerApiUrl, type ServerConnectionConfig } from '@/api/server
 export type MemoOperation = {
   operationId: string;
   memoId: string;
-  operation: 'create' | 'update' | 'delete';
+  operation: 'create' | 'update' | 'delete' | 'restore' | 'purge';
   content?: string;
   createdAt?: string;
   baseVersion?: number;
@@ -142,8 +142,9 @@ export async function sendMemoOperation(config: ServerConnectionConfig, operatio
     return readResultVersion(body);
   }
   if (!operation.baseVersion) throw new MemoSyncError(false, undefined, 'Missing Server version');
-  const body = await request(config, `/api/v1/notes/${encodeURIComponent(operation.memoId)}`, {
-    method: operation.operation === 'update' ? 'PATCH' : 'DELETE',
+  const suffix = operation.operation === 'restore' || operation.operation === 'purge' ? `/${operation.operation}` : '';
+  const body = await request(config, `/api/v1/notes/${encodeURIComponent(operation.memoId)}${suffix}`, {
+    method: operation.operation === 'update' ? 'PATCH' : operation.operation === 'delete' ? 'DELETE' : 'POST',
     headers,
     body: JSON.stringify(
       operation.operation === 'update'
@@ -154,6 +155,85 @@ export async function sendMemoOperation(config: ServerConnectionConfig, operatio
   confirmImages(body, operation.images);
   confirmFiles(body, operation.files, operation.fileObjects);
   return readResultVersion(body);
+}
+
+export type ServerMemo = {
+  note_id: string;
+  content: string;
+  images: string[];
+  files: string[];
+  file_attachments: { id: string; name: string; media_type: string; size: number; sha256: string }[];
+  version: number;
+  created_at: string;
+  updated_at: string;
+  deleted_at: string | null;
+  expires_at: string | null;
+};
+
+function validateServerMemo(value: unknown): ServerMemo {
+  if (typeof value !== 'object' || value === null) throw new MemoSyncError(false, undefined, 'Server returned an invalid note');
+  const note = value as Record<string, unknown>;
+  const images = note.images;
+  const files = note.files;
+  const attachments = note.file_attachments;
+  const validFileAttachments = Array.isArray(files) && Array.isArray(attachments) && attachments.length === files.length &&
+    attachments.every((value, index) => {
+      if (typeof value !== 'object' || value === null) return false;
+      const attachment = value as Record<string, unknown>;
+      return attachment.id === files[index] && typeof attachment.name === 'string' && attachment.name.length > 0 &&
+        typeof attachment.media_type === 'string' && attachment.media_type.length > 0 &&
+        typeof attachment.size === 'number' && Number.isSafeInteger(attachment.size) && attachment.size >= 0 &&
+        typeof attachment.sha256 === 'string' && /^[a-f0-9]{64}$/.test(attachment.sha256);
+    });
+  if (typeof note.note_id !== 'string' || note.note_id.length === 0 || typeof note.content !== 'string' ||
+    typeof note.version !== 'number' || !Number.isInteger(note.version) || note.version < 1 ||
+    !Array.isArray(images) || !images.every((id) => typeof id === 'string' && id.length > 0) || new Set(images).size !== images.length ||
+    !Array.isArray(files) || !files.every((id) => typeof id === 'string' && id.length > 0) || new Set(files).size !== files.length ||
+    !validFileAttachments ||
+    typeof note.created_at !== 'string' || Number.isNaN(Date.parse(note.created_at)) ||
+    typeof note.updated_at !== 'string' || Number.isNaN(Date.parse(note.updated_at)) ||
+    (note.deleted_at !== null && (typeof note.deleted_at !== 'string' || Number.isNaN(Date.parse(note.deleted_at)))) ||
+    (note.expires_at !== null && (typeof note.expires_at !== 'string' || Number.isNaN(Date.parse(note.expires_at)))) ||
+    (note.deleted_at === null) !== (note.expires_at === null) ||
+    (typeof note.deleted_at === 'string' && typeof note.expires_at === 'string' &&
+      Date.parse(note.expires_at) <= Date.parse(note.deleted_at))) {
+    throw new MemoSyncError(false, undefined, 'Server returned invalid note fields');
+  }
+  return note as ServerMemo;
+}
+
+async function fetchMemoList(config: ServerConnectionConfig, path: string): Promise<ServerMemo[]> {
+  const body = await request(config, path, { method: 'GET' });
+  if (typeof body !== 'object' || body === null || !('notes' in body) || !Array.isArray(body.notes)) {
+    throw new MemoSyncError(false, undefined, 'Server returned an invalid note list');
+  }
+  return body.notes.map(validateServerMemo);
+}
+
+export function fetchTrashMemos(config: ServerConnectionConfig) { return fetchMemoList(config, '/api/v1/trash'); }
+export function fetchActiveMemos(config: ServerConnectionConfig) { return fetchMemoList(config, '/api/v1/notes'); }
+
+export async function fetchServerMemo(config: ServerConnectionConfig, memoId: string) {
+  return validateServerMemo(await request(config, `/api/v1/notes/${encodeURIComponent(memoId)}`, { method: 'GET' }));
+}
+
+export async function downloadMemoObject(config: ServerConnectionConfig, path: string) {
+  const serverApiUrl = normalizeServerApiUrl(config.serverApiUrl);
+  const abortController = new AbortController();
+  const timeout = setTimeout(() => abortController.abort(), 60_000);
+  try {
+    const response = await fetch(`${serverApiUrl}${path}`, {
+      method: 'GET', redirect: 'error', signal: abortController.signal,
+      headers: { Authorization: `Bearer ${config.apiKey}` },
+    });
+    if (!response.ok) throw new MemoSyncError(response.status >= 500 || response.status === 429, response.status, `object_http_${response.status}`);
+    return { bytes: new Uint8Array(await response.arrayBuffer()), mediaType: response.headers.get('Content-Type') ?? '' };
+  } catch (error) {
+    if (error instanceof MemoSyncError) throw error;
+    throw new MemoSyncError(true, undefined, 'object_network_error', { cause: error });
+  } finally {
+    clearTimeout(timeout);
+  }
 }
 
 export async function uploadMemoFile(

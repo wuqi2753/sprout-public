@@ -145,8 +145,9 @@ test('REQ-041 file records survive reopen and failed Outbox insertion rolls back
     assert.equal((await database.getFirstAsync('SELECT COUNT(*) AS count FROM memos')).count, 1);
     await database.execAsync('DROP TRIGGER reject_outbox');
     await memos.deleteMemo('file-memo');
-    assert.equal((await database.getFirstAsync('SELECT COUNT(*) AS count FROM memo_files')).count, 0);
-    assert.deepEqual(removed, ['failed-memo'], 'pending create retains its file until delete is acknowledged');
+    assert.equal((await database.getFirstAsync('SELECT COUNT(*) AS count FROM memo_files')).count, 1);
+    assert.equal((await memos.getTrashMemos())[0].fileAttachments[0].name, '账单.pdf');
+    assert.deepEqual(removed, ['failed-memo'], 'trash retains its file until permanent deletion is acknowledged');
   } finally { await database.closeAsync(); }
 });
 
@@ -291,6 +292,180 @@ function isolatedDirectory(context) {
   context.after(() => rmSync(directory, { recursive: true, force: true }));
   return directory;
 }
+
+test('REQ-066 real SQLite keeps trash operations across restart, restore and atomic clear', async (context) => {
+  const directory = isolatedDirectory(context);
+  const databasePath = path.join(directory, 'trash.db');
+  let sequence = 0;
+  const loadMemos = (database) => loadStorage('memos.native.ts', {
+    '@/storage/database.native': { getDatabase: async () => database },
+    '@/storage/objects.native': { persistMemoImages: async () => [], resolveObjectUri: (key) => key, deleteMemoObjects: () => {} },
+    '@/storage/file-objects.native': { persistMemoFile: async () => { throw new Error('No file expected'); } },
+    '@/storage/file-attachment-rules': { validateFileAttachment: (name, size) => ({ name, size, mediaType: 'application/pdf' }) },
+    '@/memos': { extractTags: () => [] },
+    '@/sync/uuid': { createUuid: () => `trash-op-${++sequence}` },
+  });
+  let database = openSQLite(databasePath);
+  try {
+    await nativeStorage(async () => database).getDatabase();
+    const memos = loadMemos(database);
+    await memos.addMemo({ id: 'trash-memo', content: 'recover me', imageUris: [], createdOn: new Date('2026-10-01T00:00:00Z') });
+    await memos.deleteMemo('trash-memo');
+    assert.equal((await memos.getMemos()).length, 0);
+    assert.equal((await memos.getTrashMemos())[0].content, 'recover me');
+    await memos.restoreMemo('trash-memo');
+    assert.equal((await memos.getMemos())[0].id, 'trash-memo');
+    await memos.deleteMemo('trash-memo');
+    await database.execAsync("CREATE TRIGGER reject_clear BEFORE INSERT ON memo_outbox WHEN NEW.operation='purge' BEGIN SELECT RAISE(ABORT, 'queue failure'); END;");
+    await assert.rejects(memos.clearTrashMemos(), /queue failure/);
+    assert.equal((await memos.getTrashMemos()).length, 1);
+    await database.execAsync('DROP TRIGGER reject_clear');
+    await memos.clearTrashMemos();
+    assert.equal((await memos.getTrashMemos()).length, 0);
+    assert.deepEqual((await database.getAllAsync('SELECT operation FROM memo_outbox ORDER BY rowid')).map((row) => row.operation),
+      ['create', 'delete', 'restore', 'delete', 'purge']);
+  } finally { await database.closeAsync(); }
+  database = openSQLite(databasePath);
+  try {
+    await nativeStorage(async () => database).getDatabase();
+    assert.equal((await loadMemos(database).getTrashMemos()).length, 0);
+    assert.equal((await database.getFirstAsync("SELECT COUNT(*) AS count FROM memo_outbox WHERE operation='purge'")).count, 1);
+  } finally { await database.closeAsync(); }
+});
+
+test('REQ-066 real SQLite pull follows another client without overwriting pending local recovery', async (context) => {
+  const directory = isolatedDirectory(context);
+  const database = openSQLite(path.join(directory, 'trash-pull.db'));
+  const memoId = 'remote-trash-memo';
+  const imageId = `${memoId}:0`;
+  const fileId = `${memoId}:file`;
+  let remoteNotes = [];
+  let remoteTrash = [];
+  let sequence = 0;
+  const removedObjectKeys = [];
+  const deletedMemoIds = [];
+  const base = { note_id: memoId, content: 'remote content', images: [imageId], files: [fileId],
+    file_attachments: [{ id: fileId, name: 'note.pdf', media_type: 'application/pdf', size: 5, sha256: 'a'.repeat(64) }],
+    created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-08T00:00:00Z' };
+  const modules = {
+    '@/api/memo-sync': { fetchActiveMemos: async () => remoteNotes, fetchTrashMemos: async () => remoteTrash,
+      downloadMemoObject: async (_config, path) => path.includes('/objects/')
+        ? { mediaType: 'image/png', bytes: Uint8Array.from([0x89, 0x50, 0x4e, 0x47, 13, 10, 26, 10]) }
+        : { mediaType: 'application/pdf', bytes: Uint8Array.from([37, 80, 68, 70, 45]) } },
+    '@/storage/database.native': { getDatabase: async () => database },
+    '@/storage/file-objects.native': { hashFileBytes: async () => 'a'.repeat(64) },
+    '@/storage/objects.native': { deleteMemoObjects: (id) => deletedMemoIds.push(id), deleteObjectKeys: (keys) => removedObjectKeys.push(...keys),
+      persistDownloadedObject: () => `object-${++sequence}`, resolveObjectUri: (key) => key },
+    '@/sync/uuid': { createUuid: () => `pull-op-${++sequence}` },
+  };
+  const loadPull = () => {
+    const source = readFileSync(new URL('../../src/sync/memo-pull.native.ts', import.meta.url), 'utf8');
+    const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+    const exports = {};
+    vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})`)((specifier) => {
+      if (!(specifier in modules)) throw new Error(`Unexpected module: ${specifier}`);
+      return modules[specifier];
+    }, { exports }, exports);
+    return exports.pullRemoteMemos;
+  };
+  try {
+    await nativeStorage(async () => database).getDatabase();
+    const pull = loadPull();
+    const local = loadStorage('memos.native.ts', {
+      ...modules, '@/memos': { extractTags: () => [] },
+      '@/storage/file-attachment-rules': { validateFileAttachment: (name, size) => ({ name, size, mediaType: 'application/pdf' }) },
+    });
+    remoteNotes = [{ ...base, version: 1, deleted_at: null, expires_at: null }];
+    await pull({});
+    assert.equal((await local.getMemos())[0].content, base.content);
+    assert.equal((await local.getMemos())[0].imageUris.length, 1);
+    assert.equal((await local.getMemos())[0].fileAttachments[0].name, 'note.pdf');
+    const revisedFileId = `${memoId}:11111111-1111-4111-8111-111111111111:file`;
+    remoteNotes = [{ ...base, version: 2, deleted_at: null, expires_at: null, images: [imageId, `${memoId}:1`],
+      files: [revisedFileId], file_attachments: [{ ...base.file_attachments[0], id: revisedFileId, sha256: 'b'.repeat(64) }] }];
+    await assert.rejects(pull({}), /integrity check/);
+    assert.equal((await local.getMemos())[0].imageUris.length, 1, 'failed attachment download leaves the local snapshot intact');
+    assert.equal(removedObjectKeys.length, 1, 'newly downloaded objects are removed after integrity failure');
+    await local.setMemoHidden(memoId, true);
+    remoteNotes = [];
+    remoteTrash = [{ ...base, version: 2, deleted_at: '2026-10-08T01:00:00Z', expires_at: '2026-11-07T01:00:00Z' }];
+    await pull({});
+    assert.equal((await local.getTrashMemos())[0].hidden, true);
+    await local.restoreMemo(memoId);
+    await pull({});
+    assert.equal((await local.getMemos())[0].id, memoId, 'pending local restore takes precedence');
+    await database.runAsync("UPDATE memo_outbox SET state='acked',result_version=3 WHERE operation='restore'");
+    remoteTrash = [];
+    remoteNotes = [{ ...base, version: 3, deleted_at: null, expires_at: null }];
+    await pull({});
+    assert.equal((await local.getMemos())[0].hidden, true);
+    remoteNotes = [];
+    await pull({});
+    assert.equal((await local.getMemos()).length, 0, 'remote purge removes confirmed local copy');
+    assert.deepEqual(deletedMemoIds, [memoId], 'remote purge cleans the local attachment directory');
+    assert.equal(removedObjectKeys.length, 1, 'unchanged attachments are reused across remote versions');
+  } finally { await database.closeAsync(); }
+});
+
+test('REQ-066 version conflict rolls back local restore and preserves the failed operation', async (context) => {
+  const directory = isolatedDirectory(context);
+  const database = openSQLite(path.join(directory, 'trash-conflict.db'));
+  let sequence = 0;
+  try {
+    await nativeStorage(async () => database).getDatabase();
+    await database.runAsync(`INSERT INTO memos(id,content,created_at,updated_at,server_version,deleted_at,expires_at)
+      VALUES(?,?,?,?,?,?,?)`, 'conflicted', 'keep me', '2026-10-01T00:00:00Z', '2026-10-08T00:00:00Z', 2,
+      '2026-10-08T00:00:00Z', '2026-11-07T00:00:00Z');
+    const storage = loadStorage('memos.native.ts', {
+      '@/storage/database.native': { getDatabase: async () => database },
+      '@/storage/objects.native': { resolveObjectUri: (key) => key },
+      '@/storage/file-attachment-rules': { validateFileAttachment: () => { throw new Error('Unexpected file'); } },
+      '@/memos': { extractTags: () => [] }, '@/sync/uuid': { createUuid: () => `conflict-op-${++sequence}` },
+    });
+    await storage.restoreMemo('conflicted');
+    assert.equal((await storage.getMemos()).length, 1);
+    const source = readFileSync(new URL('../../src/sync/memo-outbox.native.ts', import.meta.url), 'utf8');
+    const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, target: ts.ScriptTarget.ES2022 } }).outputText;
+    const modules = {
+      '@/api/memo-sync': {}, 'expo-file-system': {}, '@/storage/database.native': { getDatabase: async () => database },
+      '@/storage/objects.native': {}, '@/storage/server-connection': { getServerConnectionConfig: async () => ({ serverApiUrl: 'http://127.0.0.1:1', apiKey: 'fixture' }) },
+      '@/sync/memo-pull.native': { pullRemoteMemos: async () => { throw new Error('Must not pull after conflict'); } },
+      '@/storage/file-objects.native': {},
+      '@/sync/memo-outbox-core': { synchronizeMemoOutbox: async (dependencies) => {
+        const rows = await dependencies.getPendingOperations();
+        assert.equal(rows.length, 1);
+        await dependencies.markFailed(rows[0], { retryable: false, message: 'version_conflict' });
+      } },
+    };
+    const exports = {};
+    vm.runInNewContext(`(function(require, module, exports) { ${compiled}\n})`)((specifier) => {
+      if (!(specifier in modules)) throw new Error(`Unexpected module: ${specifier}`);
+      return modules[specifier];
+    }, { exports }, exports);
+    await assert.rejects(exports.syncMemoOutbox(), /version_conflict/);
+    assert.equal((await storage.getMemos()).length, 0);
+    assert.equal((await storage.getTrashMemos())[0].content, 'keep me');
+    assert.deepEqual(await database.getFirstAsync("SELECT operation_id,state,last_error FROM memo_outbox WHERE operation='restore'"),
+      { operation_id: 'conflict-op-1', state: 'permanent_failed', last_error: 'version_conflict' });
+    await database.runAsync(`INSERT INTO memos(id,content,created_at,updated_at,server_version,hidden)
+      VALUES(?,?,?,?,?,1)`, 'hidden-direct', 'private', '2026-10-01T00:00:00Z', '2026-10-08T00:00:00Z', 1);
+    await database.runAsync('INSERT INTO memo_images(id,memo_id,object_key,position) VALUES(?,?,?,0)',
+      'hidden-direct:0', 'hidden-direct', 'hidden-direct/image.png');
+    await storage.deleteMemo('hidden-direct');
+    assert.equal((await storage.getTrashMemos()).some((memo) => memo.id === 'hidden-direct'), false);
+    const hiddenTombstone = await database.getFirstAsync("SELECT deleted_at,purged_at FROM memos WHERE id='hidden-direct'");
+    assert.equal(hiddenTombstone.deleted_at, null);
+    assert.equal(typeof hiddenTombstone.purged_at, 'string');
+    assert.equal((await database.getFirstAsync("SELECT operation FROM memo_outbox WHERE memo_id='hidden-direct'")).operation, 'purge');
+    assert.equal((await database.getFirstAsync("SELECT COUNT(*) AS count FROM memo_images WHERE memo_id='hidden-direct'")).count, 1,
+      'private attachment stays until Server confirms the purge');
+    await assert.rejects(exports.syncMemoOutbox(), /version_conflict/);
+    assert.equal((await storage.getMemos()).some((memo) => memo.id === 'hidden-direct'), true,
+      'permanent Server rejection restores the hidden note locally');
+    assert.deepEqual(await database.getFirstAsync("SELECT operation_id,state,last_error FROM memo_outbox WHERE memo_id='hidden-direct'"),
+      { operation_id: 'conflict-op-2', state: 'permanent_failed', last_error: 'version_conflict' });
+  } finally { await database.closeAsync(); }
+});
 
 test('REQ-037 fresh initialization creates empty tables and does not seed credentials or images', async (context) => {
   const directory = isolatedDirectory(context);

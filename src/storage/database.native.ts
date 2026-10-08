@@ -45,7 +45,7 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase) {
     CREATE TABLE IF NOT EXISTS memo_outbox (
       operation_id TEXT PRIMARY KEY NOT NULL,
       memo_id TEXT NOT NULL,
-      operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'delete')),
+      operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'delete', 'restore', 'purge')),
       payload TEXT NOT NULL,
       state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'retryable_failed', 'permanent_failed', 'acked')),
       attempt_count INTEGER NOT NULL DEFAULT 0,
@@ -84,6 +84,39 @@ async function initializeDatabase(database: SQLite.SQLiteDatabase) {
   }
   if (!memoColumns.some((column) => column.name === 'server_version')) {
     await database.execAsync('ALTER TABLE memos ADD COLUMN server_version INTEGER');
+  }
+  if (!memoColumns.some((column) => column.name === 'deleted_at')) {
+    await database.execAsync('ALTER TABLE memos ADD COLUMN deleted_at TEXT');
+  }
+  if (!memoColumns.some((column) => column.name === 'expires_at')) {
+    await database.execAsync('ALTER TABLE memos ADD COLUMN expires_at TEXT');
+  }
+  if (!memoColumns.some((column) => column.name === 'purged_at')) {
+    await database.execAsync('ALTER TABLE memos ADD COLUMN purged_at TEXT');
+  }
+  const outboxColumns = await database.getAllAsync<{ sql: string }>("SELECT sql FROM sqlite_master WHERE type='table' AND name='memo_outbox'");
+  if (outboxColumns[0]?.sql && !outboxColumns[0].sql.includes("'restore'")) {
+    await database.withExclusiveTransactionAsync(async (transaction) => {
+      await transaction.execAsync(`
+        ALTER TABLE memo_outbox RENAME TO memo_outbox_old;
+        CREATE TABLE memo_outbox (
+          operation_id TEXT PRIMARY KEY NOT NULL,
+          memo_id TEXT NOT NULL,
+          operation TEXT NOT NULL CHECK (operation IN ('create', 'update', 'delete', 'restore', 'purge')),
+          payload TEXT NOT NULL,
+          state TEXT NOT NULL CHECK (state IN ('pending', 'sending', 'retryable_failed', 'permanent_failed', 'acked')),
+          attempt_count INTEGER NOT NULL DEFAULT 0,
+          next_attempt_at TEXT,
+          last_error TEXT,
+          result_version INTEGER,
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO memo_outbox SELECT * FROM memo_outbox_old;
+        DROP TABLE memo_outbox_old;
+        CREATE INDEX IF NOT EXISTS memo_outbox_pending_index ON memo_outbox(state, created_at);
+        CREATE INDEX IF NOT EXISTS memo_outbox_memo_id_index ON memo_outbox(memo_id, created_at);
+      `);
+    });
   }
   const legacyMemos = await database.getAllAsync<{
     id: string;

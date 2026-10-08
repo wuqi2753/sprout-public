@@ -1,10 +1,11 @@
-import { getAppliedOperationVersion, MemoSyncError, sendMemoOperation, uploadMemoImage, uploadMemoFile } from '@/api/memo-sync';
+import { fetchServerMemo, getAppliedOperationVersion, MemoSyncError, sendMemoOperation, uploadMemoImage, uploadMemoFile } from '@/api/memo-sync';
 import { File } from 'expo-file-system';
 import { getDatabase } from '@/storage/database.native';
 import { deleteMemoObjects, resolveObjectUri } from '@/storage/objects.native';
 import { getServerConnectionConfig } from '@/storage/server-connection';
 import { synchronizeMemoOutbox, type MemoOperationRequest, type OutboxRow } from '@/sync/memo-outbox-core';
 import { hashFileBytes } from '@/storage/file-objects.native';
+import { pullRemoteMemos } from '@/sync/memo-pull.native';
 
 type DatabaseOutboxRow = {
   operation_id: string;
@@ -15,6 +16,20 @@ type DatabaseOutboxRow = {
 };
 
 let activeSync: Promise<void> | undefined;
+let syncRequestedAgain = false;
+let syncProgress = { syncing: false, remainingOperations: 0 };
+const syncProgressListeners = new Set<() => void>();
+
+// REQ-051: report real operation progress to home and trash titles.
+export function getMemoSyncProgress() { return syncProgress; }
+export function subscribeMemoSyncProgress(listener: () => void) {
+  syncProgressListeners.add(listener);
+  return () => { syncProgressListeners.delete(listener); };
+}
+function publishSyncProgress(syncing: boolean, remainingOperations: number) {
+  syncProgress = { syncing, remainingOperations };
+  syncProgressListeners.forEach((listener) => listener());
+}
 
 function imageMediaType(uri: string) {
   const extension = uri.split(/[?#]/, 1)[0].split('.').pop()?.toLowerCase();
@@ -65,15 +80,18 @@ async function lastServerVersion(memoId: string) {
      WHERE memo_id = ? AND state = 'acked'`,
     memoId,
   );
-  return row?.version ?? undefined;
+  const memo = await database.getFirstAsync<{ server_version: number | null }>('SELECT server_version FROM memos WHERE id = ?', memoId);
+  return Math.max(row?.version ?? 0, memo?.server_version ?? 0) || undefined;
 }
 
-async function markAcknowledged(operationId: string, resultVersion: number) {
+async function markAcknowledged(config: NonNullable<Awaited<ReturnType<typeof getServerConnectionConfig>>>, operationId: string, resultVersion: number) {
   const database = await getDatabase();
   const operation = await database.getFirstAsync<{ memo_id: string; operation: string }>(
     'SELECT memo_id, operation FROM memo_outbox WHERE operation_id = ?', operationId,
   );
-  if (operation?.operation === 'delete') deleteMemoObjects(operation.memo_id);
+  if (!operation) throw new Error(`Cannot acknowledge missing operation: ${operationId}`);
+  const deletedNote = operation.operation === 'delete' ? await fetchServerMemo(config, operation.memo_id) : undefined;
+  if (deletedNote && (!deletedNote.deleted_at || !deletedNote.expires_at)) throw new MemoSyncError(false, undefined, 'Server delete response has no expiry');
   await database.withExclusiveTransactionAsync(async (transaction) => {
     const result = await transaction.runAsync(
       `UPDATE memo_outbox
@@ -89,27 +107,48 @@ async function markAcknowledged(operationId: string, resultVersion: number) {
       resultVersion,
       operationId,
     );
+    if (deletedNote) await transaction.runAsync(
+      'UPDATE memos SET deleted_at = ?, expires_at = ? WHERE id = ?', deletedNote.deleted_at, deletedNote.expires_at, operation.memo_id,
+    );
+    if (operation.operation === 'restore') await transaction.runAsync(
+      'UPDATE memos SET deleted_at = NULL, expires_at = NULL WHERE id = ?', operation.memo_id,
+    );
+    if (operation.operation === 'purge') {
+      await transaction.runAsync('DELETE FROM memo_files WHERE memo_id = ?', operation.memo_id);
+      await transaction.runAsync('DELETE FROM memo_images WHERE memo_id = ?', operation.memo_id);
+      await transaction.runAsync('DELETE FROM memos WHERE id = ?', operation.memo_id);
+    }
   });
+  if (operation.operation === 'purge') deleteMemoObjects(operation.memo_id);
 }
 
 async function markFailed(row: OutboxRow, retryable: boolean, message: string) {
   const database = await getDatabase();
   const attemptCount = row.attemptCount + 1;
   const retryDelay = Math.min(5 * 60_000, 2 ** Math.min(attemptCount, 8) * 1000);
-  await database.runAsync(
-    `UPDATE memo_outbox
-     SET state = ?, next_attempt_at = ?, last_error = ?
-     WHERE operation_id = ?`,
-    retryable ? 'retryable_failed' : 'permanent_failed',
-    retryable ? new Date(Date.now() + retryDelay).toISOString() : null,
-    message,
-    row.operationId,
-  );
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    await transaction.runAsync(
+      `UPDATE memo_outbox SET state = ?, next_attempt_at = ?, last_error = ? WHERE operation_id = ?`,
+      retryable ? 'retryable_failed' : 'permanent_failed',
+      retryable ? new Date(Date.now() + retryDelay).toISOString() : null,
+      message, row.operationId,
+    );
+    if (!retryable && row.operation === 'restore') {
+      const operation = await transaction.getFirstAsync<{ payload: string }>('SELECT payload FROM memo_outbox WHERE operation_id=?', row.operationId);
+      if (!operation) throw new Error(`Cannot roll back missing restore: ${row.operationId}`);
+      const previous = JSON.parse(operation.payload) as { deleted_at: string; expires_at: string | null };
+      await transaction.runAsync('UPDATE memos SET deleted_at=?, expires_at=? WHERE id=?', previous.deleted_at, previous.expires_at, row.memoId);
+    }
+    if (!retryable && row.operation === 'purge') {
+      await transaction.runAsync('UPDATE memos SET purged_at=NULL WHERE id=?', row.memoId);
+    }
+  });
 }
 
 async function synchronizePendingMemos() {
   const config = await getServerConnectionConfig();
   if (!config) return;
+  publishSyncProgress(true, 0);
   const database = await getDatabase();
   await database.runAsync(
     `UPDATE memo_outbox
@@ -134,6 +173,7 @@ async function synchronizePendingMemos() {
            )
          ORDER BY rowid`,
       );
+      publishSyncProgress(true, rows.length);
       return rows.map((row) => ({
         operationId: row.operation_id,
         memoId: row.memo_id,
@@ -152,7 +192,10 @@ async function synchronizePendingMemos() {
     getAppliedOperationVersion: (operationId, memoId, operation) =>
       getAppliedOperationVersion(config, operationId, { memoId, operation }),
     sendMemoOperation: (operation) => sendMemoWithImages(config, operation),
-    markAcknowledged,
+    markAcknowledged: async (operationId, resultVersion) => {
+      await markAcknowledged(config, operationId, resultVersion);
+      publishSyncProgress(true, Math.max(0, syncProgress.remainingOperations - 1));
+    },
     markFailed: async (row, failure) => {
       failures.push(failure.message);
       await markFailed(row, failure.retryable, failure.message);
@@ -163,11 +206,23 @@ async function synchronizePendingMemos() {
     }),
   });
   if (failures.length) throw new Error(`同步未完成：${failures[0]}`);
+  await pullRemoteMemos(config);
 }
 
 export function syncMemoOutbox() {
-  activeSync ??= synchronizePendingMemos().finally(() => {
+  if (activeSync) {
+    syncRequestedAgain = true;
+    return activeSync;
+  }
+  // A restore queued while delete is in flight must get its own batch.
+  activeSync = (async () => {
+    do {
+      syncRequestedAgain = false;
+      await synchronizePendingMemos();
+    } while (syncRequestedAgain);
+  })().finally(() => {
     activeSync = undefined;
+    publishSyncProgress(false, 0);
   });
   return activeSync;
 }

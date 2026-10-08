@@ -65,6 +65,7 @@ type note struct {
 	CreatedAt       string         `json:"created_at"`
 	UpdatedAt       string         `json:"updated_at"`
 	DeletedAt       *string        `json:"deleted_at"`
+	ExpiresAt       *string        `json:"expires_at"`
 }
 type operationStatus struct {
 	OperationID   string `json:"operation_id"`
@@ -163,6 +164,9 @@ func openNoteStore(databasePath string) (store *noteStore, initializationError e
 	if err := store.initializeFileObjects(databasePath); err != nil {
 		return nil, err
 	}
+	if err := store.initializeTrash(); err != nil {
+		return nil, err
+	}
 	return store, nil
 }
 func (store *noteStore) close() error { return store.database.Close() }
@@ -186,8 +190,12 @@ func newHandler(apiKey string, store *noteStore) http.Handler {
 			writeAPIError(w, 401, "invalid_api_key", "API key is missing or invalid")
 			return
 		}
+		if r.Method == http.MethodGet {
+			handleListActiveNotes(w, r, store)
+			return
+		}
 		if r.Method != http.MethodPost {
-			w.Header().Set("Allow", http.MethodPost)
+			w.Header().Set("Allow", "GET, POST")
 			writeAPIError(w, 405, "method_not_allowed", "method is not allowed")
 			return
 		}
@@ -199,6 +207,24 @@ func newHandler(apiKey string, store *noteStore) http.Handler {
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, notesPath+"/")
+		if strings.HasSuffix(id, "/restore") {
+			id = strings.TrimSuffix(id, "/restore")
+			if !noteIDPattern.MatchString(id) || r.Method != http.MethodPost {
+				writeAPIError(w, 400, "invalid_request", "restore requires a valid note_id and POST")
+				return
+			}
+			handleRestoreNote(w, r, store, id)
+			return
+		}
+		if strings.HasSuffix(id, "/purge") {
+			id = strings.TrimSuffix(id, "/purge")
+			if !noteIDPattern.MatchString(id) || r.Method != http.MethodPost {
+				writeAPIError(w, 400, "invalid_request", "purge requires a valid note_id and POST")
+				return
+			}
+			handlePurgeNote(w, r, store, id)
+			return
+		}
 		if strings.Contains(id, "/") || !noteIDPattern.MatchString(id) {
 			writeAPIError(w, 400, "invalid_note_id", "note_id has an invalid format")
 			return
@@ -215,6 +241,7 @@ func newHandler(apiKey string, store *noteStore) http.Handler {
 			writeAPIError(w, 405, "method_not_allowed", "method is not allowed")
 		}
 	})
+	store.registerTrashRoutes(mux, apiKey)
 	mux.HandleFunc(operationsPath, func(w http.ResponseWriter, r *http.Request) {
 		if !authenticate(r, apiKey) {
 			writeAPIError(w, 401, "invalid_api_key", "API key is missing or invalid")
@@ -526,10 +553,15 @@ func handleDeleteNote(w http.ResponseWriter, r *http.Request, store *noteStore, 
 		if n.Version != input.BaseVersion {
 			return jsonResult(409, versionConflictError{apiErrorBody{"version_conflict", "base_version does not match the current note version"}, n}, 0)
 		}
+		if n.DeletedAt != nil {
+			return apiErrorResult(409, "note_deleted", "note has already been deleted")
+		}
 		n.Version++
 		n.UpdatedAt = stamp
 		n.DeletedAt = &stamp
-		if _, err = tx.ExecContext(r.Context(), `UPDATE notes SET version=?,updated_at=?,deleted_at=? WHERE note_id=?`, n.Version, stamp, stamp, id); err != nil {
+		expires := mustParseTime(stamp).Add(30 * 24 * time.Hour).Format(time.RFC3339Nano)
+		n.ExpiresAt = &expires
+		if _, err = tx.ExecContext(r.Context(), `UPDATE notes SET version=?,updated_at=?,deleted_at=?,expires_at=? WHERE note_id=?`, n.Version, stamp, stamp, expires, id); err != nil {
 			return 0, nil, 0, err
 		}
 		return jsonResult(200, n, n.Version)
@@ -547,7 +579,7 @@ func handleGetOperation(w http.ResponseWriter, r *http.Request, store *noteStore
 		writeAPIError(w, 500, "database_error", "failed to read operation")
 		return
 	}
-	if !uuidPattern.MatchString(s.OperationID) || !noteIDPattern.MatchString(s.NoteID) || (s.Operation != "create" && s.Operation != "update" && s.Operation != "delete") || s.Status != "applied" || s.ResultVersion < 1 || !validTimestamp(s.AppliedAt) {
+	if !uuidPattern.MatchString(s.OperationID) || !noteIDPattern.MatchString(s.NoteID) || !slices.Contains([]string{"create", "update", "delete", "restore", "purge", "clear"}, s.Operation) || s.Status != "applied" || s.ResultVersion < 1 || !validTimestamp(s.AppliedAt) {
 		writeAPIError(w, 500, "database_error", "stored operation has invalid fields")
 		return
 	}
@@ -599,10 +631,13 @@ type rowQueryer interface {
 
 func getNoteWithQuery(ctx context.Context, q rowQueryer, id string) (note, error) {
 	var n note
-	var deleted sql.NullString
-	err := q.QueryRowContext(ctx, `SELECT note_id,content,version,created_at,updated_at,deleted_at FROM notes WHERE note_id=?`, id).Scan(&n.NoteID, &n.Content, &n.Version, &n.CreatedAt, &n.UpdatedAt, &deleted)
+	var deleted, expires sql.NullString
+	err := q.QueryRowContext(ctx, `SELECT note_id,content,version,created_at,updated_at,deleted_at,expires_at FROM notes WHERE note_id=?`, id).Scan(&n.NoteID, &n.Content, &n.Version, &n.CreatedAt, &n.UpdatedAt, &deleted, &expires)
 	if deleted.Valid {
 		n.DeletedAt = &deleted.String
+	}
+	if expires.Valid {
+		n.ExpiresAt = &expires.String
 	}
 	if err != nil {
 		return n, err
@@ -628,7 +663,7 @@ func getNoteWithQuery(ctx context.Context, q rowQueryer, id string) (note, error
 	if err := readNoteFiles(ctx, q, &n); err != nil {
 		return note{}, err
 	}
-	if !noteIDPattern.MatchString(n.NoteID) || (strings.TrimSpace(n.Content) == "" && len(n.Images) == 0 && len(n.Files) == 0) || !validNoteFiles(n.NoteID, n.Files, n.Images) || !validNoteImageIDs(n.NoteID, n.Images) || n.Version < 1 || !validTimestamp(n.CreatedAt) || !validTimestamp(n.UpdatedAt) || (n.DeletedAt != nil && !validTimestamp(*n.DeletedAt)) {
+	if !noteIDPattern.MatchString(n.NoteID) || (strings.TrimSpace(n.Content) == "" && len(n.Images) == 0 && len(n.Files) == 0) || !validNoteFiles(n.NoteID, n.Files, n.Images) || !validNoteImageIDs(n.NoteID, n.Images) || n.Version < 1 || !validTimestamp(n.CreatedAt) || !validTimestamp(n.UpdatedAt) || (n.DeletedAt != nil && !validTimestamp(*n.DeletedAt)) || (n.ExpiresAt != nil && !validTimestamp(*n.ExpiresAt)) {
 		return note{}, errors.New("stored note has invalid fields")
 	}
 	return n, nil

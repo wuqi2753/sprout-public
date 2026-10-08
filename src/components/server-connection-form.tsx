@@ -32,7 +32,7 @@ import {
 type ConnectionFeedback = { title: string; message?: string; afterDismiss?: () => void };
 
 // REQ-016: docs/stories/v0.2.0/REQ-016-server-connection-form.md
-export function ServerConnectionForm({ onConnected }: { onConnected?: () => void }) {
+export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?: () => void; onDismiss?: () => void }) {
   const router = useRouter();
   const theme = useTheme();
   const scrollViewRef = useRef<ScrollView>(null);
@@ -133,10 +133,10 @@ export function ServerConnectionForm({ onConnected }: { onConnected?: () => void
         behavior={Platform.OS === 'ios' ? 'padding' : 'height'}
         style={styles.screen}>
         <View style={styles.header}>
-          {!onConnected && <Pressable
-            accessibilityLabel="返回"
+          {(onDismiss || !onConnected) && <Pressable
+            accessibilityLabel={onDismiss ? '关闭连接配置' : '返回'}
             accessibilityRole="button"
-            onPress={() => router.canGoBack() ? router.back() : router.replace('/')}
+            onPress={onDismiss ?? (() => router.canGoBack() ? router.back() : router.replace('/'))}
             style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
             <SymbolView
               name={{ ios: 'xmark', android: 'close', web: 'close' }}

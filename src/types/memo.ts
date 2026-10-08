@@ -11,6 +11,8 @@ export type Memo = {
   imageUris: string[];
   synced: boolean;
   hidden?: boolean;
+  deletedAt?: Date;
+  expiresAt?: Date;
   fileAttachments: StoredFileAttachment[];
 };
 

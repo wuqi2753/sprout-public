@@ -36,6 +36,7 @@ test('opening an older memo database adds server_version without changing stored
     async getAllAsync(sql) {
       if (sql === 'PRAGMA table_info(memo_files)') return [{ name: 'position' }];
       if (sql === 'PRAGMA table_info(memos)') return columns.map((name) => ({ name }));
+      if (sql.includes("FROM sqlite_master")) return [{ sql: "CHECK (operation IN ('restore'))" }];
       if (sql.includes('SELECT id, content, created_at FROM memos')) return [];
       throw new Error(`Unexpected SQL: ${sql}`);
     },
@@ -90,6 +91,7 @@ test('migration requeues image-only create and adds image update for text alread
     async getAllAsync(sql) {
       if (sql === 'PRAGMA table_info(memo_files)') return [{ name: 'position' }];
       if (sql === 'PRAGMA table_info(memos)') return [{ name: 'server_version' }];
+      if (sql.includes("FROM sqlite_master")) return [{ sql: "CHECK (operation IN ('restore'))" }];
       if (sql.includes('SELECT id, content, created_at FROM memos')) return [];
       throw new Error(`Unexpected SQL: ${sql}`);
     },

@@ -60,3 +60,16 @@ export function deleteObjectKeys(objectKeys: string[]) {
     if (file.exists) file.delete();
   }
 }
+
+export function persistDownloadedObject(memoId: string, extension: string, bytes: Uint8Array) {
+  if (!/^[a-zA-Z0-9-]+$/.test(memoId) || !/^[a-zA-Z0-9]{1,8}$/.test(extension) || bytes.length === 0) {
+    throw new Error('Invalid downloaded memo object');
+  }
+  ensureObjectsDirectory();
+  const memoDirectory = new Directory(objectsDirectory, memoId);
+  memoDirectory.create({ intermediates: true, idempotent: true });
+  const objectName = createObjectName(0, `remote.${extension}`);
+  const objectKey = `${memoId}/${objectName}`;
+  new File(memoDirectory, objectName).write(bytes);
+  return objectKey;
+}

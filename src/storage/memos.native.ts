@@ -16,6 +16,8 @@ type MemoRow = {
   updated_at: string;
   synced: number;
   hidden: number;
+  deleted_at: string | null;
+  expires_at: string | null;
 };
 
 type MemoImageRow = {
@@ -36,15 +38,16 @@ function parseStoredDate(value: string, fieldName: string, memoId: string) {
   return date;
 }
 
-export async function getMemos(): Promise<Memo[]> {
+async function readMemos(deleted: boolean): Promise<Memo[]> {
   const database = await getDatabase();
   const memoRows = await database.getAllAsync<MemoRow>(
-    `SELECT id, content, created_at, updated_at, hidden,
+    `SELECT id, content, created_at, updated_at, hidden, deleted_at, expires_at,
       NOT EXISTS (
         SELECT 1 FROM memo_outbox
         WHERE memo_outbox.memo_id = memos.id AND memo_outbox.state != 'acked'
       ) AS synced
-     FROM memos ORDER BY created_at DESC, id DESC`,
+     FROM memos WHERE purged_at IS NULL AND ${deleted ? 'deleted_at IS NOT NULL' : 'deleted_at IS NULL'}
+     ORDER BY ${deleted ? 'deleted_at' : 'created_at'} DESC, id DESC`,
   );
   const imageRows = await database.getAllAsync<MemoImageRow>(
     'SELECT memo_id, object_key FROM memo_images ORDER BY memo_id, position',
@@ -84,9 +87,15 @@ export async function getMemos(): Promise<Memo[]> {
     imageUris: imageUrisByMemoId.get(memoRow.id) ?? [],
     synced: memoRow.synced === 1,
     hidden: memoRow.hidden === 1,
+    deletedAt: memoRow.deleted_at ? parseStoredDate(memoRow.deleted_at, 'deleted_at', memoRow.id) : undefined,
+    expiresAt: memoRow.expires_at ? parseStoredDate(memoRow.expires_at, 'expires_at', memoRow.id) : undefined,
     fileAttachments: filesByMemoId.get(memoRow.id) ?? [],
   }));
 }
+
+export async function getMemos(): Promise<Memo[]> { return readMemos(false); }
+
+export async function getTrashMemos(): Promise<Memo[]> { return readMemos(true); }
 
 export async function getMemo(id: string) {
   return (await getMemos()).find((memo) => memo.id === id);
@@ -310,18 +319,61 @@ export async function deleteMemo(id: string) {
   const database = await getDatabase();
   const deletedAt = new Date().toISOString();
   await database.withExclusiveTransactionAsync(async (transaction) => {
-    await transaction.runAsync('DELETE FROM memo_files WHERE memo_id = ?', id);
-    await transaction.runAsync('DELETE FROM memo_images WHERE memo_id = ?', id);
-    const result = await transaction.runAsync('DELETE FROM memos WHERE id = ?', id);
+    const memo = await transaction.getFirstAsync<{ hidden: number }>('SELECT hidden FROM memos WHERE id = ? AND deleted_at IS NULL AND purged_at IS NULL', id);
+    if (!memo || (memo.hidden !== 0 && memo.hidden !== 1)) throw new Error(`Cannot delete missing or invalid memo: ${id}`);
+    const permanentlyDelete = memo.hidden === 1;
+    const result = await transaction.runAsync(
+      'UPDATE memos SET deleted_at = ?, expires_at = NULL, purged_at = ? WHERE id = ? AND deleted_at IS NULL AND purged_at IS NULL',
+      permanentlyDelete ? null : deletedAt, permanentlyDelete ? deletedAt : null, id,
+    );
     if (result.changes !== 1) throw new Error(`Cannot delete missing memo: ${id}`);
     await transaction.runAsync(
       `INSERT INTO memo_outbox
         (operation_id, memo_id, operation, payload, state, created_at)
-       VALUES (?, ?, 'delete', '{}', 'pending', ?)`,
+       VALUES (?, ?, ?, '{}', 'pending', ?)`,
       createUuid(),
       id,
+      permanentlyDelete ? 'purge' : 'delete',
       deletedAt,
     );
   });
-  // Keep image files until the Server confirms the queued delete. Earlier create operations may still need them.
+  // Attachments remain available for recovery until the Server confirms a purge.
+}
+
+export async function restoreMemo(id: string) {
+  const database = await getDatabase();
+  const restoredAt = new Date().toISOString();
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    const memo = await transaction.getFirstAsync<{ deleted_at: string; expires_at: string | null }>(
+      'SELECT deleted_at, expires_at FROM memos WHERE id = ? AND deleted_at IS NOT NULL AND purged_at IS NULL', id,
+    );
+    if (!memo) throw new Error(`Cannot restore missing trash memo: ${id}`);
+    const result = await transaction.runAsync('UPDATE memos SET deleted_at = NULL, expires_at = NULL WHERE id = ? AND deleted_at IS NOT NULL AND purged_at IS NULL', id);
+    if (result.changes !== 1) throw new Error(`Cannot restore missing trash memo: ${id}`);
+    await transaction.runAsync(`INSERT INTO memo_outbox (operation_id,memo_id,operation,payload,state,created_at) VALUES (?,?,'restore',?,'pending',?)`,
+      createUuid(), id, JSON.stringify(memo), restoredAt);
+  });
+}
+
+export async function purgeMemo(id: string) {
+  const database = await getDatabase();
+  const purgedAt = new Date().toISOString();
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    const result = await transaction.runAsync('UPDATE memos SET purged_at = ? WHERE id = ? AND deleted_at IS NOT NULL AND purged_at IS NULL', purgedAt, id);
+    if (result.changes !== 1) throw new Error(`Cannot purge missing trash memo: ${id}`);
+    await transaction.runAsync(`INSERT INTO memo_outbox (operation_id,memo_id,operation,payload,state,created_at) VALUES (?,?,'purge','{}','pending',?)`, createUuid(), id, purgedAt);
+  });
+}
+
+export async function clearTrashMemos() {
+  const database = await getDatabase();
+  const purgedAt = new Date().toISOString();
+  await database.withExclusiveTransactionAsync(async (transaction) => {
+    const memos = await transaction.getAllAsync<{ id: string }>('SELECT id FROM memos WHERE deleted_at IS NOT NULL AND purged_at IS NULL');
+    for (const memo of memos) {
+      const result = await transaction.runAsync('UPDATE memos SET purged_at=? WHERE id=? AND purged_at IS NULL', purgedAt, memo.id);
+      if (result.changes !== 1) throw new Error(`Cannot clear trash memo: ${memo.id}`);
+      await transaction.runAsync(`INSERT INTO memo_outbox (operation_id,memo_id,operation,payload,state,created_at) VALUES (?,?,'purge','{}','pending',?)`, createUuid(), memo.id, purgedAt);
+    }
+  });
 }

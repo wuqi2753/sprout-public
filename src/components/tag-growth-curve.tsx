@@ -30,7 +30,7 @@ function GrowthCount({ total, progress }: { total: number; progress: Animated.Va
       const settleAt = placesFromRight === 0 ? 1 : placesFromRight === 1 ? 0.78 : 0.58;
       return <View key={placesFromRight} style={[styles.countViewport, { width: 14 * fontScale, height: digitHeight }]}>
         <Animated.View style={{ transform: [{ translateY: progress.interpolate({ inputRange: [0, settleAt], outputRange: [0, -steps * digitHeight], extrapolate: 'clamp' }) }] }}>
-          {Array.from({ length: steps + 1 }, (_, position) => <ThemedText key={position} style={[styles.total, styles.countDigit, { height: digitHeight }]} themeColor="memoStatisticsText">{position % 10}</ThemedText>)}
+          {Array.from({ length: steps + 1 }, (_, position) => <ThemedText key={position} style={[styles.total, styles.countDigit, { height: digitHeight }]} themeColor="growthTotalText">{position % 10}</ThemedText>)}
         </Animated.View>
       </View>;
     })}
@@ -54,11 +54,17 @@ export function TagGrowthCurve({ visible, memos }: { visible: boolean; memos: Me
   }
   const [referenceDate, setReferenceDate] = useState(() => new Date());
   const today = visible ? new Date() : referenceDate;
-  useEffect(() => {
-    const subscription = AppState.addEventListener('change', (state) => { if (state === 'active') setReferenceDate(new Date()); });
-    return () => subscription.remove();
-  }, []);
   const [growth] = useState(() => new Animated.Value(0));
+  useEffect(() => {
+    const subscription = AppState.addEventListener('change', (state) => {
+      if (state === 'active') setReferenceDate(new Date());
+      if (state !== 'active' || visible) {
+        growth.stopAnimation();
+        growth.setValue(1);
+      }
+    });
+    return () => subscription.remove();
+  }, [growth, visible]);
   const [reduceMotion, setReduceMotion] = useState(false);
   useEffect(() => {
     let active = true;

@@ -19,7 +19,126 @@ for (const name of ['server-connection', 'memo-sync']) {
   writeFileSync(join(compiledDirectory, `${name}.js`), compiled);
 }
 const { probeServerConnection } = require(join(compiledDirectory, 'server-connection.js'));
-const { getAppliedOperationVersion, sendMemoOperation, uploadMemoImage, uploadMemoFile, MemoSyncError } = require(join(compiledDirectory, 'memo-sync.js'));
+const { getAppliedOperationVersion, sendMemoOperation, uploadMemoImage, uploadMemoFile, fetchActiveMemos, fetchTrashMemos, fetchServerMemo, MemoSyncError } = require(join(compiledDirectory, 'memo-sync.js'));
+
+test('REQ-065/066 mock E2E: delete, lost response, cross-device trash, restore and 30-day expiry', async (t) => {
+  const memoId = '018f4b64-8be1-7ee2-b608-9d26c750f57a';
+  let clock = new Date('2026-10-07T12:00:00.000Z');
+  let memo;
+  let deleteApplies = 0;
+  let loseDeleteResponse = true;
+  const processed = new Map();
+  const server = createServer(async (request, response) => {
+    response.setHeader('Content-Type', 'application/json');
+    if (request.headers.authorization !== 'Bearer trash-key') {
+      response.writeHead(401).end(JSON.stringify({ error: { code: 'invalid_api_key' } }));
+      return;
+    }
+    const send = (status, value) => response.writeHead(status).end(JSON.stringify(value));
+    const key = request.headers['idempotency-key'];
+    if (key && processed.has(key)) { send(200, processed.get(key).body); return; }
+    if (request.method === 'GET' && request.url.startsWith('/api/v1/sync/operations/')) {
+      const result = processed.get(request.url.split('/').at(-1));
+      send(result ? 200 : 404, result
+        ? { operation_id: request.url.split('/').at(-1), note_id: memoId, operation: result.operation, status: 'applied', result_version: result.body.version }
+        : { error: { code: 'operation_not_found' } });
+      return;
+    }
+    if (request.method === 'GET' && request.url === '/api/v1/notes') {
+      send(200, { notes: memo && !memo.deleted_at ? [memo] : [] }); return;
+    }
+    if (request.method === 'GET' && request.url === '/api/v1/trash') {
+      send(200, { notes: memo?.deleted_at && clock < new Date(memo.expires_at) ? [memo] : [] }); return;
+    }
+    if (request.method === 'GET' && request.url === `/api/v1/notes/${memoId}`) {
+      send(memo ? 200 : 404, memo ?? { error: { code: 'note_not_found' } }); return;
+    }
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    const body = JSON.parse(Buffer.concat(chunks).toString());
+    if (request.method === 'POST' && request.url === '/api/v1/notes') {
+      memo = { note_id: memoId, content: body.content, images: [], files: [], file_attachments: [],
+        version: 1, created_at: body.created_at, updated_at: clock.toISOString(), deleted_at: null, expires_at: null };
+      processed.set(key, { operation: 'create', body: { ...memo } });
+      send(201, memo); return;
+    }
+    if (body.base_version !== memo?.version) { send(409, { error: { code: 'version_conflict' } }); return; }
+    if (request.method === 'DELETE' && request.url === `/api/v1/notes/${memoId}`) {
+      deleteApplies++;
+      memo = { ...memo, version: memo.version + 1, updated_at: clock.toISOString(), deleted_at: clock.toISOString(),
+        expires_at: new Date(clock.getTime() + 30 * 86400_000).toISOString() };
+      processed.set(key, { operation: 'delete', body: { ...memo } });
+      if (loseDeleteResponse) { loseDeleteResponse = false; request.socket.destroy(); return; }
+      send(200, memo); return;
+    }
+    if (request.method === 'POST' && request.url === `/api/v1/notes/${memoId}/restore`) {
+      if (clock >= new Date(memo.expires_at)) { send(410, { error: { code: 'note_expired' } }); return; }
+      memo = { ...memo, version: memo.version + 1, deleted_at: null, expires_at: null, updated_at: clock.toISOString() };
+      processed.set(key, { operation: 'restore', body: { ...memo } });
+      send(200, memo); return;
+    }
+    send(404, { error: { code: 'not_found' } });
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const config = { serverApiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: 'trash-key' };
+  const operations = [];
+  let version;
+  const dependencies = {
+    recoverSendingOperations: async () => {},
+    getPendingOperations: async () => operations.filter((row) => row.state !== 'acked'),
+    markSending: async (id) => { operations.find((row) => row.operationId === id).state = 'sending'; },
+    getLastServerVersion: async () => version,
+    getAppliedOperationVersion: (id, noteId, operation) => getAppliedOperationVersion(config, id, { memoId: noteId, operation }),
+    sendMemoOperation: (operation) => sendMemoOperation(config, operation),
+    markAcknowledged: async (id, resultVersion) => { operations.find((row) => row.operationId === id).state = 'acked'; version = resultVersion; },
+    markFailed: async (row, failure) => { row.state = failure.retryable ? 'retryable_failed' : 'permanent_failed'; row.attemptCount++; },
+    classifyFailure: (error) => ({ retryable: error instanceof MemoSyncError && error.retryable, message: String(error) }),
+  };
+  const queue = (operation, suffix, payload) => operations.push({ operationId: `0199a633-67aa-7e58-97f8-0196e3684b${suffix}`, memoId,
+    operation, payload: JSON.stringify(payload), attemptCount: 0, state: 'pending' });
+  queue('create', 'a1', { content: '可恢复的想法', created_at: '2026-10-01T00:00:00Z' });
+  await synchronizeMemoOutbox(dependencies);
+  assert.equal(version, 1);
+  queue('delete', 'a2', {});
+  await synchronizeMemoOutbox(dependencies);
+  assert.equal(operations.at(-1).state, 'retryable_failed');
+  clock = new Date('2026-10-08T12:00:00.000Z');
+  await synchronizeMemoOutbox(dependencies);
+  assert.equal(operations.at(-1).state, 'acked');
+  assert.equal(deleteApplies, 1);
+  assert.equal((await fetchTrashMemos(config))[0].expires_at, '2026-11-06T12:00:00.000Z');
+  assert.deepEqual(await fetchActiveMemos(config), []);
+  queue('restore', 'a3', {});
+  await synchronizeMemoOutbox(dependencies);
+  assert.equal(version, 3);
+  assert.equal((await fetchActiveMemos(config))[0].note_id, memoId);
+  assert.deepEqual(await fetchTrashMemos(config), []);
+  clock = new Date('2026-10-09T12:00:00.000Z');
+  queue('delete', 'a4', {});
+  await synchronizeMemoOutbox(dependencies);
+  clock = new Date('2026-11-08T12:00:00.000Z');
+  assert.deepEqual(await fetchTrashMemos(config), []);
+  await assert.rejects(sendMemoOperation(config, { operationId: '0199a633-67aa-7e58-97f8-0196e3684ba5', memoId, operation: 'restore', baseVersion: 4 }),
+    { statusCode: 410, retryable: false });
+  assert.equal((await fetchServerMemo(config, memoId)).version, 4);
+});
+
+test('REQ-066 rejects malformed remote attachment metadata before local download', async (t) => {
+  const memo = { note_id: '018f4b64-8be1-7ee2-b608-9d26c750f57a', content: 'file', images: [], files: ['note:file'],
+    file_attachments: [{ id: 'note:file', name: 'report.pdf', media_type: 'application/pdf', size: -1, sha256: 'invalid' }],
+    version: 2, created_at: '2026-10-01T00:00:00Z', updated_at: '2026-10-02T00:00:00Z',
+    deleted_at: '2026-10-02T00:00:00Z', expires_at: '2026-11-01T00:00:00Z' };
+  const server = createServer((_request, response) => {
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ notes: [memo] }));
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  const config = { serverApiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: 'fixture-key' };
+  await assert.rejects(fetchTrashMemos(config), /invalid note fields/);
+});
 
 test('REQ-045 local HTTP redirects cannot forward authenticated requests', async (t) => {
   let targetRequests = 0;

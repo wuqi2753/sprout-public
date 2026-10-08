@@ -42,6 +42,7 @@ type ExploreFilterPanelProps = {
   showingHidden?: boolean;
   authenticating?: boolean;
   onSelectVisibility?: (hidden: boolean) => void;
+  onOpenTrash?: () => void;
 };
 
 const weekdayLabels = ['日', '一', '二', '三', '四', '五', '六'];
@@ -85,6 +86,7 @@ export function ExploreFilterPanel({
   showingHidden = false,
   authenticating = false,
   onSelectVisibility,
+  onOpenTrash,
 }: ExploreFilterPanelProps) {
   const theme = useTheme();
   const [linkError, setLinkError] = useState<string>();
@@ -326,6 +328,15 @@ export function ExploreFilterPanel({
           </View>
           </Animated.View>
         </View>
+        {onOpenTrash && <Pressable accessibilityRole="button" accessibilityLabel="回收站" onPress={onOpenTrash}
+          style={({ pressed }) => [styles.visibilityRow, { marginHorizontal: Spacing.two, marginTop: Spacing.two }, pressed && styles.pressed]}>
+          <View style={styles.visibilityLabelGroup}>
+            <Svg width={20} height={20} viewBox="0 0 24 24" accessible={false}>
+              <Path d="M4 7h16M9 7V4h6v3m-9 0 1 13h10l1-13M10 11v6m4-6v6" fill="none" stroke={theme.text} strokeWidth={1.6} strokeLinecap="round" strokeLinejoin="round" />
+            </Svg>
+            <ThemedText style={styles.sidebarLabel}>回收站</ThemedText>
+          </View>
+        </Pressable>}
       </ScrollView>
       <View style={[styles.sidebarFooter, { borderTopColor: theme.border }]}>
         <ThemeModeSwitch />

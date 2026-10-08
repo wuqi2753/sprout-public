@@ -18,6 +18,7 @@ test('REQ-039 configured home initializes before loading real memos', async () =
     initializeWelcomeMemo: async () => calls.push('initialize'),
     getMemos: async () => { calls.push('read'); return ['welcome']; },
     setMemos: (memos) => calls.push(...memos), setFeedback: () => assert.fail('unexpected failure'),
+    setDeletedMemoId: () => {},
     hiddenMemoSession: { getSnapshot: () => ({ authenticating: false }) }, console,
   });
   await new Promise(setImmediate);

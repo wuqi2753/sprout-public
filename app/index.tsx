@@ -5,8 +5,8 @@ import { Image } from 'expo-image';
 import { BlurTargetView, BlurView } from 'expo-blur';
 import { SymbolView } from 'expo-symbols';
 import Svg, { Path } from 'react-native-svg';
-import { useFocusEffect, useRouter } from 'expo-router';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useFocusEffect, useLocalSearchParams, useRouter } from 'expo-router';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   ActivityIndicator,
   Animated,
@@ -38,9 +38,9 @@ import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
 import { useServerConnectionStatus } from '@/hooks/use-server-connection';
 import { findTagDraft, formatMemoTime } from '@/memos';
-import { addMemo, deleteMemo, getMemos, initializeWelcomeMemo, renameMemoFile, setMemoHidden } from '@/storage/memos';
+import { addMemo, deleteMemo, getMemos, initializeWelcomeMemo, renameMemoFile, restoreMemo, setMemoHidden } from '@/storage/memos';
 import type { Memo } from '@/types/memo';
-import { syncMemoOutbox } from '@/sync/memo-outbox';
+import { getMemoSyncProgress, subscribeMemoSyncProgress, syncMemoOutbox } from '@/sync/memo-outbox';
 import { createUuid } from '@/sync/uuid';
 import { FileAttachmentCard } from '@/components/file-attachment-card';
 import { FileTypeIcon } from '@/components/file-type-icon';
@@ -192,6 +192,7 @@ function IconButton({
 
 // REQ-016: docs/stories/v0.2.0/REQ-016-server-connection-form.md
 export default function HomeEntry() {
+  const { openSidebar } = useLocalSearchParams<{ openSidebar?: string }>();
   const [entry, setEntry] = useState<'loading' | 'welcome' | 'capture'>('loading');
   const [configReadError, setConfigReadError] = useState(false);
   useEffect(() => {
@@ -204,15 +205,15 @@ export default function HomeEntry() {
     return () => { active = false; };
   }, []);
   if (entry === 'loading') return null;
-  if (entry === 'capture') return <HomeScreen />;
+  if (entry === 'capture') return <HomeScreen openSidebar={openSidebar === '1'} />;
   return <>
-    <ServerConnectionForm onConnected={() => setEntry('capture')} />
+    <ServerConnectionForm onConnected={() => setEntry('capture')} onDismiss={() => setEntry('capture')} />
     <FeedbackDialog visible={configReadError} title="无法读取服务器配置"
       message="请重新填写连接配置并连接服务器。" onDismiss={() => setConfigReadError(false)} />
   </>;
 }
 
-function HomeScreen() {
+function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
   const insets = useSafeAreaInsets();
   const [captureEntryHeight, setCaptureEntryHeight] = useState(48);
   const theme = useTheme();
@@ -239,7 +240,60 @@ function HomeScreen() {
   const [savingMemo, setSavingMemo] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
   const [syncFeedback, setSyncFeedback] = useState<string>();
+  const syncProgress = useSyncExternalStore(subscribeMemoSyncProgress, getMemoSyncProgress, getMemoSyncProgress);
+  const syncTitle = syncProgress.syncing || refreshing
+    ? syncProgress.remainingOperations > 0 ? `同步中[${syncProgress.remainingOperations}]` : '同步中.'
+    : undefined;
   const [feedback, setFeedback] = useState<{ title: string; message?: string }>();
+  // REQ-067: flomo's deletion notice is exclusive to the home menu.
+  const [deletedMemoId, setDeletedMemoId] = useState<string>();
+  const [restoringDeletedMemo, setRestoringDeletedMemo] = useState(false);
+  const deletionNoticeOpacity = useRef(new Animated.Value(0)).current;
+  const deletionPendingRef = useRef(false);
+  const restorePendingRef = useRef(false);
+  useEffect(() => {
+    if (!deletedMemoId || restoringDeletedMemo) return;
+    deletionNoticeOpacity.setValue(0);
+    Animated.timing(deletionNoticeOpacity, { toValue: 1, duration: 150, useNativeDriver: true }).start();
+    const dismissalTimer = setTimeout(() => {
+      Animated.timing(deletionNoticeOpacity, { toValue: 0, duration: 150, useNativeDriver: true }).start(({ finished }) => {
+        if (finished) setDeletedMemoId((currentId) => currentId === deletedMemoId ? undefined : currentId);
+      });
+    }, 2000);
+    return () => { clearTimeout(dismissalTimer); deletionNoticeOpacity.stopAnimation(); };
+  }, [deletedMemoId, restoringDeletedMemo, deletionNoticeOpacity]);
+
+  async function undoHomeDeletion() {
+    if (!deletedMemoId || restorePendingRef.current || deletionPendingRef.current) return;
+    restorePendingRef.current = true;
+    setRestoringDeletedMemo(true);
+    try {
+      await restoreMemo(deletedMemoId);
+      setDeletedMemoId(undefined);
+      setMemos(await getMemos());
+      void syncHomeChanges();
+    } catch (error) {
+      console.error('无法撤销删除', error);
+      setDeletedMemoId(undefined);
+      showFeedback('无法撤销删除', '请在回收站重试恢复；若笔记已被彻底删除，则无法恢复。');
+    } finally {
+      restorePendingRef.current = false;
+      setRestoringDeletedMemo(false);
+    }
+  }
+  const syncHomeChanges = useCallback(async () => {
+    try {
+      await syncMemoOutbox();
+      setMemos(await getMemos());
+    } catch {
+      setSyncFeedback('变更已保存在手机上，部分记录未同步，请检查连接后重试。');
+      try { setMemos(await getMemos()); }
+      catch (storageError) {
+        console.error('无法刷新记录', storageError);
+        setFeedback({ title: '无法刷新记录', message: '请稍后重试。' });
+      }
+    }
+  }, []);
   function showFeedback(title: string, message?: string) { setFeedback({ title, message }); }
   function showStorageError(title: string, error: unknown) {
     console.error(title, error);
@@ -260,7 +314,12 @@ function HomeScreen() {
   const [searchFilters, setSearchFilters] = useState<MemoSearchFilters>(emptySearchFilters);
   const [searchFiltersOpen, setSearchFiltersOpen] = useState(false);
   const [searchSort, setSearchSort] = useState<MemoSearchSort>('created-desc');
-  const [filterOpen, setFilterOpen] = useState(false);
+  const [filterOpen, setFilterOpen] = useState(openSidebar);
+  useEffect(() => {
+    if (!openSidebar) return;
+    const openingFrame = requestAnimationFrame(() => setFilterOpen(true));
+    return () => cancelAnimationFrame(openingFrame);
+  }, [openSidebar]);
   // REQ-043: Hidden notes are reached only through the sidebar.
   const hiddenMemoAccess = useHiddenMemoAccess();
   const showingHidden = hiddenMemoAccess.unlocked;
@@ -376,9 +435,16 @@ function HomeScreen() {
         });
       return () => {
         active = false;
+        setDeletedMemoId(undefined);
         if (hiddenMemoSession.getSnapshot().authenticating) hiddenMemoSession.lock();
       };
     }, [setFeedback, setMemos]),
+  );
+
+  useFocusEffect(
+    useCallback(() => {
+      void syncHomeChanges();
+    }, [syncHomeChanges]),
   );
 
   useFocusEffect(
@@ -822,6 +888,7 @@ function HomeScreen() {
                 onChangeMonth={changeMonth}
                 onSelectDay={(day) => setActiveDay((currentDay) => (currentDay === day ? null : day))}
                 onSelectTag={selectTagAndCloseFilter}
+                onOpenTrash={() => { setFilterOpen(false); router.push('/trash'); }}
                 recordDays={recordDays}
                 tags={tags}
                 width="100%"
@@ -851,11 +918,11 @@ function HomeScreen() {
                   />
                 </Pressable>
                 <ThemedText
-                  accessibilityLabel={refreshing ? '同步中' : activeTag ?? (showingHidden ? '隐藏笔记' : 'Sprout')}
+                  accessibilityLabel={syncTitle ?? activeTag ?? (showingHidden ? '隐藏笔记' : 'Sprout')}
                   accessibilityLiveRegion="polite"
                   numberOfLines={1}
-                  style={[styles.wordmark, (refreshing || activeTag !== null) && styles.tagViewTitle]}>
-                  {refreshing ? '同步中.' : activeTag ?? (showingHidden ? '隐藏笔记' : 'Sprout\u00A0')}
+                  style={[styles.wordmark, (syncTitle !== undefined || activeTag !== null) && styles.tagViewTitle]}>
+                  {syncTitle ?? activeTag ?? (showingHidden ? '隐藏笔记' : 'Sprout\u00A0')}
                 </ThemedText>
               </View>
               <View style={styles.headerActions}>
@@ -1201,12 +1268,18 @@ function HomeScreen() {
                   accessibilityRole="button"
                   onPress={async () => {
                     if (selectedMemo.hidden && !hiddenMemoSession.getSnapshot().unlocked) return;
+                    if (deletionPendingRef.current || restorePendingRef.current) return;
+                    deletionPendingRef.current = true;
                     try {
                       await deleteMemo(selectedMemo.id);
-                      setMemos(await getMemos());
                       setOpenMemoMenuId(null);
+                      if (!selectedMemo.hidden) setDeletedMemoId(selectedMemo.id);
+                      setMemos(await getMemos());
+                      void syncHomeChanges();
                     } catch (error) {
                       showStorageError('无法删除记录', error);
+                    } finally {
+                      deletionPendingRef.current = false;
                     }
                   }}
                   style={({ pressed }) => [styles.memoMenuItem, pressed && styles.pressed]}>
@@ -1279,11 +1352,28 @@ function HomeScreen() {
           setMemos(await getMemos());
         }} />}
 
+      {deletedMemoId && (
+        <Animated.View accessibilityLiveRegion="polite" style={[styles.deletionNotice, {
+          opacity: deletionNoticeOpacity,
+          width: Math.min(windowWidth, MaxContentWidth) - 48,
+          backgroundColor: theme.backgroundElement,
+          borderColor: theme.border,
+          bottom: insets.bottom + CAPTURE_ENTRY_BOTTOM_GAP + ((!showingHidden && !searchVisible) ? captureEntryHeight : 0) + 12,
+        }]}>
+          <ThemedText numberOfLines={1} style={[styles.deletionNoticeText, { color: theme.text }]}>已删除笔记</ThemedText>
+          <Pressable accessibilityRole="button" accessibilityLabel="撤销删除"
+            disabled={restoringDeletedMemo} onPress={() => void undoHomeDeletion()}
+            style={({ pressed }) => [styles.deletionUndoButton, pressed && styles.pressed]}>
+            <ThemedText style={[styles.deletionUndoLabel, { color: theme.deletionUndoText }]}>{restoringDeletedMemo ? '恢复中…' : '撤销'}</ThemedText>
+          </Pressable>
+        </Animated.View>
+      )}
+
       <FeedbackDialog
         onDismiss={() => { if (feedback) setFeedback(undefined); else setSyncFeedback(undefined); }}
         title={feedback?.title ?? syncFeedback ?? ''}
         message={feedback?.message}
-        visible={feedback !== undefined || syncFeedback !== undefined}
+        visible={feedback !== undefined || (syncFeedback !== undefined && deletedMemoId === undefined)}
       />
     </SafeAreaView>
     </SwipeSidebar>
@@ -1291,6 +1381,10 @@ function HomeScreen() {
 }
 
 const styles = StyleSheet.create({
+  deletionNotice: { position: 'absolute', alignSelf: 'center', borderWidth: 0.5, borderRadius: 12, paddingLeft: 16, paddingRight: 8, flexDirection: 'row', alignItems: 'center' },
+  deletionNoticeText: { flex: 1, fontSize: 15, lineHeight: 20 },
+  deletionUndoButton: { minHeight: 48, paddingHorizontal: 10, alignItems: 'center', justifyContent: 'center' },
+  deletionUndoLabel: { fontSize: 15, lineHeight: 20, fontWeight: '700', paddingVertical: 12 },
   screen: { flex: 1 },
   refreshArea: { flex: 1, width: '100%' },
   refreshIndicator: { position: 'absolute', top: 12, left: 0, right: 0, alignItems: 'center' },

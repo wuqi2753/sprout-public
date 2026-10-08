@@ -38,7 +38,7 @@ function createTransactionalDatabase(failOutboxInsert = false, initialMemos = []
     state,
     async getAllAsync(sql) {
       if (sql.includes('FROM memos')) return state.memos.map((memo) => ({
-        ...memo, created_at: '2026-10-02T00:00:00.000Z', updated_at: '2026-10-02T00:00:00.000Z', hidden: 0, synced: 0,
+        ...memo, created_at: '2026-10-02T00:00:00.000Z', updated_at: '2026-10-02T00:00:00.000Z', hidden: memo.hidden ?? 0, synced: 0,
       }));
       if (sql.includes('FROM memo_images')) return state.images.map((image) => ({ memo_id: image.memoId, object_key: image.objectKey }));
       if (sql.includes('FROM memo_files')) return [];
@@ -47,9 +47,18 @@ function createTransactionalDatabase(failOutboxInsert = false, initialMemos = []
     async withExclusiveTransactionAsync(callback) {
       const snapshot = structuredClone(state);
       const transaction = {
+        async getFirstAsync(_sql, id) {
+          const memo = state.memos.find((entry) => entry.id === id && !entry.deleted_at && !entry.purged_at);
+          return memo ? { hidden: memo.hidden ?? 0 } : null;
+        },
         async runAsync(sql, ...parameters) {
           if (sql.includes('INSERT INTO memos')) {
             state.memos.push({ id: parameters[0], content: parameters[1] });
+          } else if (sql.startsWith('UPDATE memos SET deleted_at')) {
+            const memo = state.memos.find((entry) => entry.id === parameters[2] && !entry.deleted_at && !entry.purged_at);
+            if (!memo) return { changes: 0 };
+            memo.deleted_at = parameters[0];
+            memo.purged_at = parameters[1];
           } else if (sql.startsWith('UPDATE memos')) {
             const memo = state.memos.find((entry) => entry.id === parameters[2]);
             if (!memo) return { changes: 0 };
@@ -124,11 +133,12 @@ test('an Outbox write failure rolls back a memo deletion', async () => {
   assert.deepEqual(deletedObjects, []);
 });
 
-test('deleting a memo removes its image relations in the same transaction', async () => {
+test('deleting a memo keeps its image relations available for recovery', async () => {
   const database = createTransactionalDatabase(false, [{ id: 'memo-1', content: '' }], [{ memoId: 'memo-1' }]);
   const storage = loadMemoStorage(database, []);
   await storage.deleteMemo('memo-1');
-  assert.deepEqual(database.state.memos, []);
-  assert.deepEqual(database.state.images, []);
+  assert.equal(database.state.memos.length, 1);
+  assert.ok(database.state.memos[0].deleted_at);
+  assert.deepEqual(database.state.images, [{ memoId: 'memo-1' }]);
   assert.deepEqual(database.state.outbox, [{ operationId: 'operation-1', memoId: 'memo-1' }]);
 });

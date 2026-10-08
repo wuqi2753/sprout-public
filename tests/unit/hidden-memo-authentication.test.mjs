@@ -274,37 +274,28 @@ test('REQ-047 unchanged editor returns with an arrow; changed content exposes sa
   await save.props.onPress(); assert.equal(changed.edits.length, 1);
 });
 
-test('REQ-047 menu copies current draft and only deletes after confirmation', async () => {
+test('REQ-047/067 menu copies current draft and moves the memo to trash once', async () => {
   const session = createSession(async () => ({ success: true }));
   const memo = { ...hiddenMemo, hidden: false };
   const screen = renderEditor(memo, session, 'unsaved draft', { menuOpen: true });
   await screen.nodes.find((node) => node.props?.accessibilityLabel === '复制全文').props.onPress();
   assert.deepEqual(screen.copies, ['unsaved draft']);
-  screen.nodes.find((node) => node.props?.accessibilityLabel === '删除记录').props.onPress();
-  assert.deepEqual(screen.deletions, []);
-  const feedback = screen.stateChanges.find(([, value]) => value?.confirmDeletion)?.[1];
-  assert.equal(feedback.title, '删除这条笔记？');
-  const cancelled = renderEditor(memo, session, 'unsaved draft', { feedback });
-  cancelled.nodes.find((node) => node.type === 'FeedbackDialog').props.onDismiss();
-  assert.deepEqual(cancelled.deletions, []);
-  const confirmed = renderEditor(memo, session, 'unsaved draft', { feedback });
-  confirmed.nodes.find((node) => node.type === 'FeedbackDialog').props.destructiveAction.onPress();
-  confirmed.nodes.find((node) => node.type === 'FeedbackDialog').props.destructiveAction.onPress();
+  const remove = screen.nodes.find((node) => node.props?.accessibilityLabel === '删除记录');
+  remove.props.onPress();
+  remove.props.onPress();
   await Promise.resolve();
-  assert.deepEqual(confirmed.deletions, ['private']);
-
+  assert.deepEqual(screen.deletions, ['private']);
+  assert.equal(screen.stateChanges.some(([, value]) => value?.confirmDeletion), false);
 });
 
-test('REQ-022 deletion confirmation cannot delete a hidden memo after relocking', async () => {
+test('REQ-067 editor deletion cannot delete a hidden memo after relocking', async () => {
   const session = createSession(async () => ({ success: true }));
   await session.unlock();
-  const screen = renderEditor(hiddenMemo, session, 'unsaved draft', {
-    feedback: { title: '删除这条笔记？', message: '删除后无法恢复。', confirmDeletion: true },
-  });
-  const confirmation = screen.nodes.find((node) => node.type === 'FeedbackDialog');
-  assert.equal(confirmation.props.visible, true);
+  const screen = renderEditor(hiddenMemo, session, 'unsaved draft', { menuOpen: true });
+  const remove = screen.nodes.find((node) => node.props?.accessibilityLabel === '删除记录');
+  assert.ok(remove);
   session.lock();
-  confirmation.props.destructiveAction.onPress();
+  remove.props.onPress();
   await Promise.resolve();
   assert.deepEqual(screen.deletions, []);
 });

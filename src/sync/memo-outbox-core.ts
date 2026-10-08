@@ -1,4 +1,4 @@
-export type OutboxOperation = 'create' | 'update' | 'delete';
+export type OutboxOperation = 'create' | 'update' | 'delete' | 'restore' | 'purge';
 
 export type OutboxRow = {
   operationId: string;

@@ -39,6 +39,7 @@ function RootLayoutContent() {
           <Stack.Screen name="explore" />
           <Stack.Screen name="memo/[id]" />
           <Stack.Screen name="server-connection" />
+          <Stack.Screen name="trash" />
         </Stack>
       </ThemeProvider>
     </GestureHandlerRootView>

@@ -17,6 +17,7 @@ function loadOutbox(database, config) {
     '@/storage/database.native': { getDatabase: async () => database },
     '@/storage/objects.native': {},
     '@/storage/server-connection': { getServerConnectionConfig: async () => config },
+    '@/sync/memo-pull.native': { pullRemoteMemos: async () => {} },
     '@/sync/memo-outbox-core': {
       synchronizeMemoOutbox: async (dependencies) => {
         await dependencies.recoverSendingOperations();
