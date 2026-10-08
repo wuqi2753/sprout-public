@@ -229,6 +229,7 @@ export async function updateMemoContent(id: string, content: string, savedAt: Da
 
 // REQ-047: attachment references and their immutable Outbox snapshot commit together.
 export async function updateMemoDraft(id: string, draft: MemoEditInput, savedAt: Date) {
+  if (draft.createdOn && Number.isNaN(draft.createdOn.getTime())) throw new Error('记录时间无效');
   const content = draft.content.trim();
   const files = draft.fileAttachments ?? [];
   if (!content && !draft.imageUris.length && !files.length) throw new Error('记录内容不能为空');
@@ -265,7 +266,7 @@ export async function updateMemoDraft(id: string, draft: MemoEditInput, savedAt:
     }
     const updatedAt = savedAt.toISOString();
     await database.withExclusiveTransactionAsync(async (transaction) => {
-      const result = await transaction.runAsync('UPDATE memos SET content = ?, updated_at = ? WHERE id = ?', content, updatedAt, id);
+      const result = await transaction.runAsync('UPDATE memos SET content = ?, updated_at = ?, created_at = ? WHERE id = ?', content, updatedAt, (draft.createdOn ?? existing.createdOn).toISOString(), id);
       if (result.changes !== 1) throw new Error(`Cannot update missing memo: ${id}`);
       await transaction.runAsync('DELETE FROM memo_images WHERE memo_id = ?', id);
       for (const [position, image] of images.entries()) {
@@ -279,7 +280,7 @@ export async function updateMemoDraft(id: string, draft: MemoEditInput, savedAt:
       await transaction.runAsync(
         `INSERT INTO memo_outbox (operation_id, memo_id, operation, payload, state, created_at)
          VALUES (?, ?, 'update', ?, 'pending', ?)`,
-        createUuid(), id, JSON.stringify({ content, images: images.map((image) => image.id), image_objects: images,
+        createUuid(), id, JSON.stringify({ content, ...(draft.createdOn ? { created_at: draft.createdOn.toISOString() } : {}), images: images.map((image) => image.id), image_objects: images,
           files: attachments.map((file) => file.id), file_objects: attachments.map((file) => ({ id: file.id, object_key: file.objectKey,
             name: file.name, media_type: file.mediaType, size: file.size, sha256: file.sha256 })) }), updatedAt,
       );

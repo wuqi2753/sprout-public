@@ -148,7 +148,7 @@ export async function sendMemoOperation(config: ServerConnectionConfig, operatio
     headers,
     body: JSON.stringify(
       operation.operation === 'update'
-        ? { content: operation.content, images: operation.images, files: operation.files, base_version: operation.baseVersion }
+        ? { content: operation.content, created_at: operation.createdAt, images: operation.images, files: operation.files, base_version: operation.baseVersion }
         : { base_version: operation.baseVersion },
     ),
   });

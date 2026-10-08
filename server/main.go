@@ -83,6 +83,8 @@ type createNoteRequest struct {
 	CreatedAt string   `json:"created_at"`
 }
 type updateNoteRequest struct {
+	// REQ-070: optional recording time correction.
+	CreatedAt   *string   `json:"created_at"`
 	Content     string    `json:"content"`
 	Images      *[]string `json:"images"`
 	Files       *[]string `json:"files"`
@@ -458,6 +460,15 @@ func handleUpdateNote(w http.ResponseWriter, r *http.Request, store *noteStore, 
 		return
 	}
 	input.Content = strings.TrimSpace(input.Content)
+	var recordingTime time.Time
+	if input.CreatedAt != nil {
+		var parseError error
+		recordingTime, parseError = time.Parse(time.RFC3339Nano, *input.CreatedAt)
+		if parseError != nil {
+			writeAPIError(w, 400, "invalid_created_at", "created_at must be an RFC 3339 timestamp")
+			return
+		}
+	}
 	if input.BaseVersion < 1 {
 		writeAPIError(w, 400, "invalid_request", "base_version must be positive and content or images must be present")
 		return
@@ -516,9 +527,12 @@ func handleUpdateNote(w http.ResponseWriter, r *http.Request, store *noteStore, 
 			}
 		}
 		n.Content = input.Content
+		if input.CreatedAt != nil {
+			n.CreatedAt = recordingTime.UTC().Format(time.RFC3339Nano)
+		}
 		n.Version++
 		n.UpdatedAt = stamp
-		if _, err = tx.ExecContext(r.Context(), `UPDATE notes SET content=?,version=?,updated_at=? WHERE note_id=?`, n.Content, n.Version, stamp, id); err != nil {
+		if _, err = tx.ExecContext(r.Context(), `UPDATE notes SET content=?,version=?,updated_at=?,created_at=? WHERE note_id=?`, n.Content, n.Version, stamp, n.CreatedAt, id); err != nil {
 			return 0, nil, 0, err
 		}
 		n, err = getNoteWithQuery(r.Context(), tx, id)

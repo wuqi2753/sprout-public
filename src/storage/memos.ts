@@ -98,6 +98,7 @@ export async function removeMemoFile(_id: string, _fileId: string): Promise<void
 }
 
 export async function updateMemoDraft(id: string, draft: MemoEditInput, savedAt: Date) {
+  if (draft.createdOn && Number.isNaN(draft.createdOn.getTime())) throw new Error('记录时间无效');
   if (!browserMemos.some((memo) => memo.id === id)) throw new Error(`Cannot update missing memo: ${id}`);
   const content = draft.content.trim();
   if (!content && !draft.imageUris.length && !(draft.fileAttachments?.length)) throw new Error('记录内容不能为空');
@@ -105,5 +106,5 @@ export async function updateMemoDraft(id: string, draft: MemoEditInput, savedAt:
   if (draft.fileAttachments?.length) throw new Error('请使用手机 App 保存文件附件');
   if (Number.isNaN(savedAt.getTime())) throw new Error('保存时间无效');
   browserMemos = browserMemos.map((memo) => memo.id === id
-    ? { ...memo, content, imageUris: [...draft.imageUris], savedAt, tags: extractTags(content), synced: false } : memo);
+    ? { ...memo, content, createdOn: draft.createdOn ?? memo.createdOn, imageUris: [...draft.imageUris], savedAt, tags: extractTags(content), synced: false } : memo);
 }

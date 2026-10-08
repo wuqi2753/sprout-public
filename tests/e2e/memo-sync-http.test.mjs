@@ -19,6 +19,34 @@ for (const name of ['server-connection', 'memo-sync']) {
   writeFileSync(join(compiledDirectory, `${name}.js`), compiled);
 }
 const { probeServerConnection } = require(join(compiledDirectory, 'server-connection.js'));
+// REQ-069: verify the actual Outbox -> HTTP PATCH timestamp contract.
+test('REQ-069 Outbox time correction reaches PATCH with seconds and version', async (t) => {
+  let patch;
+  const server = createServer(async (request, response) => {
+    const chunks = [];
+    for await (const chunk of request) chunks.push(chunk);
+    patch = { method: request.method, body: JSON.parse(Buffer.concat(chunks).toString()) };
+    response.writeHead(200, { 'Content-Type': 'application/json' }).end(JSON.stringify({ version: 2 }));
+  });
+  server.listen(0, '127.0.0.1');
+  await new Promise((resolve) => server.once('listening', resolve));
+  t.after(() => new Promise((resolve) => server.close(resolve)));
+  let acknowledged;
+  await synchronizeMemoOutbox({
+    recoverSendingOperations: async () => {},
+    getPendingOperations: async () => [{ operationId: 'time-op', memoId: 'memo', operation: 'update', attemptCount: 0,
+      payload: JSON.stringify({ content: 'original', created_at: '2024-02-29T15:59:47.000Z' }) }],
+    markSending: async () => {}, getLastServerVersion: async () => 1,
+    sendMemoOperation: (operation) => sendMemoOperation({ serverApiUrl: `http://127.0.0.1:${server.address().port}`, apiKey: 'test-key' }, operation),
+    markAcknowledged: async (_, version) => { acknowledged = version; },
+    markFailed: async (_, failure) => { throw new Error(`Unexpected sync failure: ${JSON.stringify(failure)}`); },
+    classifyFailure: (error) => ({ message: error.message }),
+  });
+  assert.equal(patch.method, 'PATCH');
+  assert.equal(patch.body.created_at, '2024-02-29T15:59:47.000Z');
+  assert.equal(patch.body.base_version, 1);
+  assert.equal(acknowledged, 2);
+});
 const { getAppliedOperationVersion, sendMemoOperation, uploadMemoImage, uploadMemoFile, fetchActiveMemos, fetchTrashMemos, fetchServerMemo, MemoSyncError } = require(join(compiledDirectory, 'memo-sync.js'));
 
 test('REQ-065/066 mock E2E: delete, lost response, cross-device trash, restore and 30-day expiry', async (t) => {

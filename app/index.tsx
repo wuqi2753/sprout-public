@@ -23,12 +23,13 @@ import {
   View,
 } from 'react-native';
 import { SafeAreaView, useSafeAreaInsets } from 'react-native-safe-area-context';
-import { Gesture, GestureDetector } from 'react-native-gesture-handler';
+import { Gesture, GestureDetector, GestureHandlerRootView } from 'react-native-gesture-handler';
 import { useMentions, type PatternsConfig } from 'react-native-controlled-mentions';
 import * as ImagePicker from 'expo-image-picker';
 import { Directory, File, Paths } from 'expo-file-system';
 
 import { SwipeSidebar } from '@/components/swipe-sidebar';
+import { ZoomableImage } from '@/components/zoomable-image';
 import { ExploreFilterPanel, type TagCount } from '@/components/explore-filter-panel';
 import { FeedbackDialog } from '@/components/feedback-dialog';
 import { Pressable } from '@/components/haptic-pressable';
@@ -305,6 +306,11 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
   const refreshStartedAtTop = useRef(false);
   const [pullOffset] = useState(() => new Animated.Value(0));
   const [imagePreview, setImagePreview] = useState<{ imageUris: string[]; index: number; hidden: boolean }>();
+  const imagePagingRef = useRef<ScrollView>(null);
+  const setImagePagingForZoom = useCallback((zoomed: boolean) => {
+    imagePagingRef.current?.setNativeProps({ scrollEnabled: !zoomed });
+  }, []);
+  const imagePagingGesture = useMemo(() => Gesture.Native(), []);
   const [fileActionMemo, setFileActionMemo] = useState<Memo & { selectedFileId: string }>();
   const [openMemoMenuId, setOpenMemoMenuId] = useState<string | null>(null);
   const [memoMenuPosition, setMemoMenuPosition] = useState({ left: 0, top: 0 });
@@ -1301,25 +1307,30 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
         transparent
         visible={Boolean(imagePreview) && (!imagePreview?.hidden || hiddenMemoAccess.unlocked)}>
         {imagePreview && (!imagePreview.hidden || hiddenMemoAccess.unlocked) && (
-          <View style={styles.imagePreviewScreen}>
-            <ScrollView
-              contentOffset={{ x: imagePreview.index * windowWidth, y: 0 }}
-              horizontal
-              key={`${imagePreview.imageUris.join('|')}-${imagePreview.index}`}
-              onMomentumScrollEnd={(event) => {
-                const nextIndex = Math.round(event.nativeEvent.contentOffset.x / windowWidth);
-                setImagePreview((currentPreview) =>
-                  currentPreview ? { ...currentPreview, index: nextIndex } : undefined,
-                );
-              }}
-              pagingEnabled
-              showsHorizontalScrollIndicator={false}>
-              {imagePreview.imageUris.map((imageUri, index) => (
-                <View key={`${imageUri}-${index}`} style={[styles.imagePreviewPage, { width: windowWidth }]}>
-                  <Image contentFit="contain" source={{ uri: imageUri }} style={styles.imagePreviewImage} />
-                </View>
-              ))}
-            </ScrollView>
+          <GestureHandlerRootView style={styles.imagePreviewScreen}>
+            <GestureDetector gesture={imagePagingGesture}>
+              <ScrollView
+                ref={imagePagingRef}
+                contentOffset={{ x: imagePreview.index * windowWidth, y: 0 }}
+                disableScrollViewPanResponder
+                horizontal
+                key={`${imagePreview.imageUris.join('|')}-${imagePreview.index}`}
+                onMomentumScrollEnd={(event) => {
+                  const nextIndex = Math.round(event.nativeEvent.contentOffset.x / windowWidth);
+                  setImagePagingForZoom(false);
+                  setImagePreview((currentPreview) =>
+                    currentPreview ? { ...currentPreview, index: nextIndex } : undefined,
+                  );
+                }}
+                pagingEnabled
+                showsHorizontalScrollIndicator={false}>
+                {imagePreview.imageUris.map((imageUri, index) => (
+                  <View key={`${imageUri}-${index}`} style={[styles.imagePreviewPage, { width: windowWidth }]}>
+                    <ZoomableImage uri={imageUri} width={windowWidth} height={windowHeight} pagingGesture={imagePagingGesture} onZoomChange={setImagePagingForZoom} />
+                  </View>
+                ))}
+              </ScrollView>
+            </GestureDetector>
             {imagePreview.imageUris.length > 1 && (
               <ThemedText style={styles.imagePreviewCounter}>
                 {imagePreview.index + 1} / {imagePreview.imageUris.length}
@@ -1333,7 +1344,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
               style={({ pressed }) => [styles.imagePreviewClose, pressed && styles.pressed]}>
               <SymbolView name={{ ios: 'xmark', android: 'close', web: 'close' }} size={26} tintColor="#FFFFFF" />
             </Pressable>
-          </View>
+          </GestureHandlerRootView>
         )}
       </Modal>
 
@@ -1498,7 +1509,6 @@ const styles = StyleSheet.create({
   memoGridImage: { width: 84, height: 84, borderRadius: 6, overflow: 'hidden' },
   imagePreviewScreen: { flex: 1, backgroundColor: '#000000' },
   imagePreviewPage: { height: '100%', alignItems: 'center', justifyContent: 'center' },
-  imagePreviewImage: { width: '100%', height: '100%' },
   imagePreviewCounter: { position: 'absolute', top: 58, alignSelf: 'center', color: '#FFFFFF', fontSize: 14, lineHeight: 20 },
   imagePreviewClose: { position: 'absolute', top: 44, right: 18, width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 24, backgroundColor: 'rgba(0, 0, 0, 0.42)' },
   inlineTagPill: { flexShrink: 0, marginHorizontal: 2, borderRadius: 6, paddingHorizontal: 4, paddingVertical: 1 },

@@ -19,6 +19,7 @@ import { findTagDraft } from '@/memos';
 import { chooseFileAttachments, discardImportedFile } from '@/storage/import-file';
 import { CaretTagSuggestions } from '@/components/caret-tag-suggestions';
 import { MemoEditorToolbar } from '@/components/memo-editor-toolbar';
+import { MemoTimePicker } from '@/components/memo-time-picker';
 import type { FileAttachment } from '@/types/attachment';
 import type { Memo } from '@/types/memo';
 import { hiddenMemoSession } from '@/auth/hidden-memo-session';
@@ -42,6 +43,8 @@ export default function EditMemoScreen() {
   const { id } = useLocalSearchParams<{ id: string }>();
   const [memo, setMemo] = useState<Memo>();
   const [content, setContent] = useState('');
+  const [createdOn, setCreatedOn] = useState<Date>();
+  const [timePickerOpen, setTimePickerOpen] = useState(false);
   const [saving, setSaving] = useState(false);
   const [imageUris, setImageUris] = useState<string[]>([]);
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
@@ -64,7 +67,7 @@ export default function EditMemoScreen() {
   const hiddenMemoAccess = useHiddenMemoAccess();
   const hiddenMemoLocked = Boolean(memo?.hidden) && !hiddenMemoAccess.unlocked;
   const canSave = Boolean(memo) && imageUris.length + fileAttachments.length <= 5 && Boolean(content.trim() || imageUris.length || fileAttachments.length) && !saving && !choosingAttachment && !hiddenMemoLocked;
-  const draftChanged = Boolean(memo) && (content !== memo!.content || imageUris.length !== memo!.imageUris.length
+  const draftChanged = Boolean(memo) && (createdOn?.getTime() !== memo!.createdOn.getTime() || content !== memo!.content || imageUris.length !== memo!.imageUris.length
     || imageUris.some((uri, index) => uri !== memo!.imageUris[index]) || fileAttachments.length !== memo!.fileAttachments.length || fileAttachments.some((file, index) => file.uri !== memo!.fileAttachments[index]?.uri || file.name !== memo!.fileAttachments[index]?.name));
   const tagDraft = findTagDraft(content, selection.start);
   const suggestedTags = !hiddenMemoLocked && tagDraft
@@ -130,6 +133,7 @@ export default function EditMemoScreen() {
         if (!active) return;
         if (!storedMemo) throw new Error(`Cannot edit missing memo: ${id}`);
         setMemo(storedMemo);
+        setCreatedOn(storedMemo.createdOn);
         setContent(storedMemo.hidden && !hiddenMemoSession.getSnapshot().unlocked ? '' : storedMemo.content);
         setImageUris(storedMemo.imageUris);
         setFileAttachments(storedMemo.fileAttachments);
@@ -249,7 +253,8 @@ export default function EditMemoScreen() {
     if (!memo || !canSave || (memo.hidden && !hiddenMemoSession.getSnapshot().unlocked)) return;
     setSaving(true);
     try {
-      await updateMemoDraft(memo.id, { content: normalizedContent, imageUris, fileAttachments }, new Date());
+      await updateMemoDraft(memo.id, { content: normalizedContent, imageUris, fileAttachments,
+        ...(createdOn?.getTime() !== memo.createdOn.getTime() ? { createdOn } : {}) }, new Date());
       setSaving(false);
       // Release the navigation guard before returning to the timeline.
       requestAnimationFrame(() => router.back());
@@ -291,9 +296,12 @@ export default function EditMemoScreen() {
           </Pressable>
           <View style={styles.titleGroup}>
             <ThemedText style={styles.title}>编辑</ThemedText>
-            <ThemedText style={styles.savedAt} themeColor="textSecondary">
-              {memo ? formatSavedAt(memo.savedAt) : '正在读取…'}
-            </ThemedText>
+            <Pressable accessibilityRole="button" accessibilityLabel="修改记录时间" disabled={!memo || saving || choosingAttachment}
+              onPress={() => { if (canChangeDraft()) { Keyboard.dismiss(); setTimePickerOpen(true); } }}
+              style={{ flexDirection: 'row', alignItems: 'center', gap: 4, minHeight: 32 }}>
+              <ThemedText style={styles.savedAt} themeColor="textSecondary">{createdOn ? formatSavedAt(createdOn) : '正在读取…'}</ThemedText>
+              {memo && <SymbolView name={{ ios: 'chevron.down', android: 'keyboard_arrow_down', web: 'keyboard_arrow_down' }} size={14} tintColor={theme.textSecondary} />}
+            </Pressable>
           </View>
           <Pressable accessibilityLabel="编辑更多操作" accessibilityRole="button" disabled={!memo || saving} onPress={() => setMenuOpen(!menuOpen)} style={styles.headerButton}>
             <View style={[styles.headerButtonCircle, { backgroundColor: theme.surface, borderColor: theme.border }]}>
@@ -366,6 +374,8 @@ export default function EditMemoScreen() {
         <MemoEditorToolbar disabled={!memo || saving || choosingAttachment} imageCount={imageUris.length}
           fileCount={fileAttachments.length} onTag={insertTag} onImage={chooseImages} onFile={chooseFile} />
       </KeyboardAvoidingView>
+      {timePickerOpen && createdOn && <MemoTimePicker date={createdOn} onCancel={() => setTimePickerOpen(false)}
+        onConfirm={(date) => { if (canChangeDraft()) setCreatedOn(date); setTimePickerOpen(false); }} />}
       {menuOpen && <View style={styles.menuOverlay}>
         <Pressable accessibilityLabel="关闭编辑菜单" onPress={() => setMenuOpen(false)} style={StyleSheet.absoluteFill} />
         <View style={[styles.menu, { backgroundColor: theme.surface, borderColor: theme.border }]}>

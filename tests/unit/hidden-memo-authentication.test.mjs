@@ -176,7 +176,7 @@ test('Web explicitly denies native biometric access', async () => {
 });
 
 function renderEditor(memo, session, draftContent = memo.content, options = {}) {
-  const states = [memo, draftContent, false, memo.imageUris ?? [], memo.fileAttachments ?? [], false, options.selection ?? { start: 0, end: 0 }, 52, true, 400, 60, options.menuOpen ?? false, options.historyTags ?? [], 0, 0, options.feedback];
+  const states = [memo, draftContent, options.createdOn ?? memo.createdOn, options.timePickerOpen ?? false, false, memo.imageUris ?? [], memo.fileAttachments ?? [], false, options.selection ?? { start: 0, end: 0 }, 52, true, 400, 60, options.menuOpen ?? false, options.historyTags ?? [], 0, 0, options.feedback];
   let stateIndex = 0;
   const effects = [];
   const edits = [];
@@ -199,6 +199,7 @@ function renderEditor(memo, session, draftContent = memo.content, options = {}) 
     'expo-image-picker': {},
     '@/storage/import-file': { discardImportedFile() {} },
     '@/components/memo-editor-toolbar': { MemoEditorToolbar: 'Toolbar' },
+    '@/components/memo-time-picker': { MemoTimePicker: 'TimePicker' },
     '@/components/caret-tag-suggestions': { CaretTagSuggestions: 'TagSuggestions' },
     '@/components/feedback-dialog': { FeedbackDialog: 'FeedbackDialog' },
     '@/components/file-type-icon': { FileTypeIcon: 'FileTypeIcon' },
@@ -225,7 +226,7 @@ function renderEditor(memo, session, draftContent = memo.content, options = {}) 
   return { tree, nodes, effects, edits, stateChanges, copies, deletions, alerts };
 }
 
-const hiddenMemo = { id: 'private', hidden: true, content: 'hidden draft', imageUris: [], tags: [], savedAt: new Date(), fileAttachments: [{ uri: 'private-uri', name: 'private.pdf' }] };
+const hiddenMemo = { id: 'private', hidden: true, content: 'hidden draft', imageUris: [], tags: [], createdOn: new Date(), savedAt: new Date(), fileAttachments: [{ uri: 'private-uri', name: 'private.pdf' }] };
 
 test('direct hidden editor route renders no draft, attachment, timestamp or save control while locked', () => {
   const session = createSession(async () => ({ success: true }));
@@ -274,6 +275,30 @@ test('REQ-047 unchanged editor returns with an arrow; changed content exposes sa
   await save.props.onPress(); assert.equal(changed.edits.length, 1);
 });
 
+test('REQ-069 time-only change enables save and commits the selected seconds', async () => {
+  const session = createSession(async () => ({ success: true }));
+  const memo = { ...hiddenMemo, hidden: false };
+  const createdOn = new Date('2024-02-29T23:59:47Z');
+  const screen = renderEditor(memo, session, memo.content, { createdOn });
+  const save = screen.nodes.find((node) => node.props?.accessibilityLabel === '保存修改');
+  assert.equal(save.props.disabled, false);
+  await save.props.onPress();
+  assert.equal(screen.edits[0][1].createdOn.getTime(), createdOn.getTime());
+});
+
+test('REQ-069 picker cancel does not change time or persist; stale confirm cannot edit locked memo', async () => {
+  const session = createSession(async () => ({ success: true }));
+  await session.unlock();
+  const screen = renderEditor(hiddenMemo, session, hiddenMemo.content, { timePickerOpen: true });
+  const picker = screen.nodes.find((node) => node.type === 'TimePicker');
+  picker.props.onCancel();
+  assert.deepEqual(screen.stateChanges, [[3, false]]);
+  session.lock();
+  picker.props.onConfirm(new Date('2024-01-01T00:00:00Z'));
+  assert.equal(screen.stateChanges.some(([index]) => index === 2), false);
+  assert.equal(screen.edits.length, 0);
+});
+
 test('REQ-047/067 menu copies current draft and moves the memo to trash once', async () => {
   const session = createSession(async () => ({ success: true }));
   const memo = { ...hiddenMemo, hidden: false };
@@ -308,7 +333,7 @@ test('REQ-047 editing tag candidate replaces the cursor token and moves the sele
   assert.deepEqual(Array.from(candidate.props.tags), ['开心']);
   candidate.props.onSelect('开心');
   assert.ok(screen.stateChanges.some(([index, value]) => index === 1 && value === '正文 #开心  后文'));
-  assert.ok(screen.stateChanges.some(([index, value]) => index === 6 && value.start === 7 && value.end === 7));
+  assert.ok(screen.stateChanges.some(([index, value]) => index === 8 && value.start === 7 && value.end === 7));
 });
 
 test('root lifecycle listener relocks access and is removed on unmount', async () => {

@@ -7,14 +7,14 @@ import ts from 'typescript';
 import { recordingStartModules } from '../fixtures/recording-start.mjs';
 
 function fixture({ failOutbox = false, failCopy = false } = {}) {
-  const state = { content: 'original', images: [{ id: 'memo:0', object_key: 'memo/old.jpg' }], files: [], outbox: [] };
+  const state = { content: 'original', createdAt: '2026-10-05T00:00:00Z', updatedAt: '2026-10-05T00:00:00Z', images: [{ id: 'memo:0', object_key: 'memo/old.jpg' }], files: [], outbox: [] };
   const objects = new Set(['memo/old.jpg']);
   const deleted = [];
   let sequence = 0;
   let uuidSequence = 0;
   const database = {
     async getAllAsync(sql) {
-      if (sql.includes('FROM memos')) return [{ id: 'memo', content: state.content, created_at: '2026-10-05T00:00:00Z', updated_at: '2026-10-05T00:00:00Z', hidden: 0, synced: 0 }];
+      if (sql.includes('FROM memos')) return [{ id: 'memo', content: state.content, created_at: state.createdAt, updated_at: state.updatedAt, hidden: 0, synced: 0 }];
       if (sql.includes('FROM memo_images')) return state.images.map((image) => ({ ...image, memo_id: 'memo' }));
       if (sql.includes('FROM memo_files')) return state.files;
       throw new Error(`Unexpected query ${sql}`);
@@ -25,7 +25,10 @@ function fixture({ failOutbox = false, failCopy = false } = {}) {
       catch (error) { Object.assign(state, snapshot); throw error; }
     },
     async runAsync(sql, ...parameters) {
-      if (sql.startsWith('UPDATE memos')) state.content = parameters[0];
+      if (sql.startsWith('UPDATE memos')) {
+        state.content = parameters[0]; state.updatedAt = parameters[1];
+        if (sql.includes('created_at = ?')) state.createdAt = parameters[2];
+      }
       else if (sql.startsWith('DELETE FROM memo_images')) state.images = [];
       else if (sql.startsWith('INSERT INTO memo_images')) state.images.push({ id: parameters[0], object_key: parameters[2] });
       else if (sql.startsWith('DELETE FROM memo_files')) state.files = [];
@@ -69,6 +72,27 @@ function fixture({ failOutbox = false, failCopy = false } = {}) {
 }
 
 const savedAt = new Date('2026-10-05T01:00:00Z');
+test('REQ-069 time-only edit persists seconds with attachments and snapshots the recording time', async () => {
+  const { storage, state } = fixture();
+  const createdOn = new Date('2024-02-29T23:59:47Z');
+  await storage.updateMemoDraft('memo', { content: 'original', imageUris: ['private://memo/old.jpg'], createdOn }, savedAt);
+  assert.equal(state.createdAt, createdOn.toISOString());
+  assert.equal(state.updatedAt, savedAt.toISOString());
+  assert.equal(state.outbox[0].created_at, createdOn.toISOString());
+  assert.equal(state.images[0].id, 'memo:0');
+  assert.equal((await storage.getMemo('memo')).createdOn.getTime(), createdOn.getTime());
+  await storage.updateMemoDraft('memo', { content: 'changed', imageUris: ['private://memo/old.jpg'] }, savedAt);
+  assert.equal(state.createdAt, createdOn.toISOString());
+  assert.equal(state.outbox[1].created_at, undefined);
+});
+test('REQ-069 invalid date and failed outbox leave the recording time untouched', async () => {
+  const { storage, state } = fixture({ failOutbox: true });
+  const original = state.createdAt;
+  await assert.rejects(storage.updateMemoDraft('memo', { content: 'original', imageUris: [], createdOn: new Date(NaN) }, savedAt), /记录时间无效/);
+  await assert.rejects(storage.updateMemoDraft('memo', { content: 'original', imageUris: [], createdOn: new Date('2024-01-01Z') }, savedAt), /outbox failed/);
+  assert.equal(state.createdAt, original);
+  assert.equal(state.outbox.length, 0);
+});
 // REQ-052: mixed snapshots preserve independent file identities and queued originals.
 test('REQ-052 two images and three files save, rename and remove only the target file', async () => {
   const { storage, state, objects } = fixture();

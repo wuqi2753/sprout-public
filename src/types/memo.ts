@@ -26,6 +26,8 @@ export type CreateMemoInput = {
 
 // REQ-047: a complete editor draft, committed only on Save.
 export type MemoEditInput = {
+  // REQ-069: recording time is independent of the save timestamp.
+  createdOn?: Date;
   content: string;
   imageUris: string[];
   fileAttachments?: FileAttachment[];
