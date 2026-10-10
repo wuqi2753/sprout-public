@@ -1,14 +1,27 @@
 # Sprout
 
-随手记录一句想法，保存到自己的 Server，再让 AI 在项目中按标签读取。Sprout App 负责快速记录和同步；Go Server 保存自己的数据；CLI 将笔记与附件同步成 AI 可读取的本地材料。
+随手记录一句真实想法，保存在自己的 Server，再让 AI 按标签读取。
 
-支持文字、图片和文件附件、标签筛选、笔记编辑与回收站。保存后下拉同步；App 不内置 AI，也不把数据发送到第三方 AI 服务。
+```text
+手机 App 记录 → 同步到自己的 Server → CLI 拉取到项目 → AI 读取本地材料
+```
+
+| 部分 | 负责什么 |
+| --- | --- |
+| App | 快速记录文字、图片与文件，编辑、搜索、标签筛选和回收站 |
+| Go Server | 保存笔记与附件，提供同步和 CLI 授权接口 |
+| CLI | 按项目和标签同步笔记、附件，生成 AI 可读取的本地材料 |
+
+Sprout 不内置 AI，不调用第三方 AI 服务。App 先保存到手机，连接 Server 后可同步；CLI 生成的材料由你选择的 AI 工具读取。App 首次默认深色，侧栏可切换浅色，重启保留选择。
 
 ## 快速开始
 
-1. 下载 Android App，按下方教程部署自己的 Server。
-2. 在 App 配置 Server URL 与 API Key，记录并下拉同步。
-3. 安装 CLI，在每个项目根目录分别扫码授权，按标签同步材料。
+1. 下载 Android App，按下方教程部署 Server 并配置自己的 HTTPS 域名。
+2. 在服务器生成配对二维码，App 打开侧栏的“扫一扫”，扫码后点“连接服务器”。
+3. 写一条笔记并下拉同步，确认不再显示“未同步”。
+4. 需要让 AI 使用笔记时，安装 CLI，在每个项目根目录分别扫码授权，再按标签同步材料。
+
+App 配对和 CLI 授权是两个步骤，使用不同二维码。CLI 0.6.0 的基本命令：
 
 ```sh
 npm install --global @sprout-native/cli@0.6.0
@@ -17,16 +30,32 @@ sprout login --server https://app.example.com --workspace .
 sprout tags --server https://app.example.com --workspace .
 sprout init --server https://app.example.com --workspace . --tags work,reading --materials agent-materials
 sprout sync --workspace .
+sprout status --workspace .
 ```
 
-CLI 要求 Node.js 22.14+，支持 macOS/Linux。登录时打开终端提供的链接，在已连接同一 Server 的 App 中扫码，核对两边的“核对码”，再选择“拒绝”或“允许”。网页会显示授权与连接结果，默认深色，可切换浅色；CLI 不要求输入 App API Key。
+CLI 要求 Node.js 22.14+，支持 macOS/Linux。登录时用电脑浏览器打开终端提供的链接，在已连接同一 Server 的 App 中从侧栏点“扫一扫”，扫描网页二维码。核对 App 与网页/终端的“核对码”，选择“拒绝”或“允许”；待确认弹窗只有这两个按钮。网页显示授权与连接结果，默认深色，可切换浅色；CLI 不要求输入 App API Key。申请过期时重新运行登录命令。
 
-同一个 `sprout` 可用于多个项目；每个根目录需要单独登录，后续修改同步标签无需再次扫码。凭据保存在工作空间外的私有配置目录，旧版共享凭据不会自动导入。详细命令、Agent 工具接口及升级说明见 [CLI README](cli/README.md)。
+`work,reading` 替换为自己的标签，不加 `#`。`agent-materials` 是项目内新建的材料目录，保存笔记 Markdown、完整 JSON 和附件；AI 工具读取这些本地文件。`sprout sync` 是一次同步命令，需要新材料时再次执行。
 
+同一个 `sprout` 可用于多个项目，每个根目录的授权和同步进度独立。凭据保存在工作空间外的私有配置目录，旧版共享凭据不会自动导入。标签是筛选条件，不限制 OAuth 授权可访问的数据。私有笔记项目将 `.sprout/` 和所选材料目录加入自己的 `.gitignore`。
+
+修改标签时选择是否补拉历史记录，无需再次扫码：
+
+```sh
+sprout set-tags --workspace . --tags work,reading,new --backfill yes
+sprout sync --workspace .
+```
+
+退出授权使用 `sprout logout --server https://app.example.com --workspace .`。完整命令、材料重建与 Agent 接口见 [CLI README](cli/README.md)，通信契约见 [CLI HTTP 协议](cli/PROTOCOL.md)。
+
+| 二维码 | 在哪里生成 | 用途 |
+| --- | --- | --- |
+| App 配对码 | Server 的 `-connection-qr` 命令 | 包含 URL 与 API Key，配置手机 App |
+| CLI 授权码 | `sprout login` 提供的授权网页 | 包含授权申请，App 核对码后允许或拒绝 CLI |
 
 ## Android 安装包
 
-在 [Releases](https://github.com/wuqi2753/sprout-public/releases/latest) 下载 [sprout-1.5.1-android.apk](https://github.com/wuqi2753/sprout-public/releases/download/v1.5.1/sprout-1.5.1-android.apk)，支持 Android 7.0+、ARM64 / ARMv7 手机。正式版内置运行代码，不需要 localhost 或开发机；首次启动后填写自己的 Server 地址与 API Key。Release 同时提供 SHA-256 文件。
+在 [Releases](https://github.com/wuqi2753/sprout-public/releases/latest) 下载 [sprout-1.5.1-android.apk](https://github.com/wuqi2753/sprout-public/releases/download/v1.5.1/sprout-1.5.1-android.apk)，支持 Android 7.0+、ARM64 / ARMv7 手机。正式版内置运行代码，不需要 Metro 或开发机；首次打开可直接记录，稍后通过侧栏扫码连接自己的 Server。Release 同时提供 [SHA-256 校验文件](https://github.com/wuqi2753/sprout-public/releases/download/v1.5.1/sprout-1.5.1-android.apk.sha256)。
 
 同一正式签名的旧版可直接覆盖更新；开发包能否覆盖取决于其签名。遇到签名不一致时先备份，不要为安装新版而直接卸载丢失本地记录。
 
@@ -41,7 +70,7 @@ CLI 要求 Node.js 22.14+，支持 macOS/Linux。登录时打开终端提供的�
 | 1 | 本地终端 → SSH 云服务器 | 安装 Go、clone、启动 Server 并测试本机 API |
 | 2 | 浏览器 Cloudflare → 本地新终端 | 添加 DNS 灰云记录，确认解析 |
 | 3 | 云服务器 SSH 终端 → 本地终端 | 安装配置 Caddy，验证公网 HTTPS |
-| 4 | 手机 App | 填 URL 和 API Key，测试同步 |
+| 4 | 云服务器终端 → 手机 App | 生成配对二维码，App 扫码连接并验证同步 |
 | 可选 | 浏览器 Cloudflare | 开启橙云并重测 |
 
 ### 1. 云服务器：安装 Go，克隆并启动 Server
@@ -76,7 +105,7 @@ echo 'export PATH="/usr/local/go/bin:$PATH"' >> "$HOME/.profile"
 go version
 ```
 
-成功示例：`go version go1.27.1 linux/amd64`（版本随官方下载更新）。若提示 `go: command not found`，检查 PATH；已有旧版或旧安装目录时，按 [Go 官方升级说明](https://go.dev/doc/install) 处理，不能向旧目录直接解压覆盖。
+确认输出为 Go 1.24 或更高版本，架构为 `linux/amd64`。若提示 `go: command not found`，检查 PATH；已有旧版或旧安装目录时，按 [Go 官方升级说明](https://go.dev/doc/install) 处理，不能向旧目录直接解压覆盖。
 
 **克隆并构建**：直接使用下面的公开仓库地址，无需登录 GitHub。
 
@@ -95,7 +124,7 @@ go build -o ../sprout-server .
 
 **创建数据目录**（首次执行）：
 
-Server 使用当前登录用户运行。`/var/lib/sprout` 保存数据库；源码、程序与配置都在 `$SPROUT_DIR`。数据库独立保存，更新代码不会替换数据。
+Server 使用当前登录用户运行。`/var/lib/sprout` 保存数据库和私有附件对象；源码、程序与配置都在 `$SPROUT_DIR`。数据独立保存，更新代码不会替换数据。
 
 ```sh
 sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 750 /var/lib/sprout
@@ -345,16 +374,53 @@ unset SPROUT_TEST_KEY
 
 Caddy 启动或证书错误在云服务器用 `sudo journalctl -u caddy -n 50 --no-pager` 查看。公网 HTTPS 成功后再配置 App。
 
-### 4. 手机 App：填写连接
+### 4. 手机 App：扫码连接自己的 Server
+
+**在云服务器终端生成配对二维码**，使用现有 `.env` 的 API Key，不重新生成 Key：
+
+```sh
+cd "$SPROUT_DIR"
+./sprout-server -env-file "$SPROUT_DIR/.env" -connection-qr https://app.example.com
+```
+
+将域名换成自己的 HTTPS 域名，使用默认 HTTPS 端口，不加 `:8080`、`/api/v1` 或其他路径。命令只显示二维码并退出，不重启服务，也不创建数据库。
+
+**在手机 App 操作：**
+
+1. 打开首页侧栏，点顶部的“扫一扫”。
+2. 允许相机权限，扫描电脑 SSH 终端里的配对二维码。
+3. App 读入服务器 API 地址和 API Key，核对域名是自己的 Server。
+4. 点“连接服务器”。App 验证成功后才保存配置；已有连接会先确认更换，现有本地笔记保留。
+5. 回到首页写一条测试笔记，附一张图片或文件，下拉同步，确认不再显示“未同步”。
+
+终端二维码无法识别时，可保存为 PNG，在电脑查看后扫码：
+
+```sh
+./sprout-server -env-file "$SPROUT_DIR/.env" -connection-qr https://app.example.com -qr-output "$SPROUT_DIR/sprout-connection-qr.png"
+```
+
+PNG 以私有权限创建，已有同名文件不会覆盖，换一个文件名即可。配对二维码包含 API Key，仅供自己连接使用，不公开发布或提交 Git。
+
+需要下载到电脑时，在本地终端将下面的登录用户、IP 和项目路径替换成实际值，执行后打开 PNG 扫码：
+
+```sh
+scp '<登录用户>@<服务器公网IP>:<项目绝对路径>/sprout-connection-qr.png' ./sprout-connection-qr.png
+```
+
+**手动填写是备用方式。** 点扫码页的“我的服务器”，或侧栏的服务器状态，进入连接表单：
 
 | 字段 | 填写 |
 | --- | --- |
-| Server URL | `https://app.example.com` |
+| 服务器 API 地址 | 自己的 HTTPS 域名，例如 `https://app.example.com` |
 | API Key | 第一步生成并写入 `SPROUT_API_KEY` 的整串字符 |
 
-URL 不加 `:8080` 或 `/api/v1`。点击“验证连接”，成功后保存；用移动网络或其他外部网络验证测试笔记、图片与编辑删除同步。
+点“连接服务器”会验证并保存；“验证连接”仅检查是否可连接，不会保存配置。用移动网络或其他外部网络验证文字、图片、文件与编辑、删除同步。
 
-保存记录后下拉同步，检查“未同步”状态确认结果。新服务器不会自动获得原服务器的数据；切换 Server 后，旧记录的修改可能返回 `note_not_found`，后续操作会等待处理。删除的笔记先进入回收站，可恢复；彻底删除后无法恢复。记录、编辑、回收站操作与附件均需要同步，不能仅凭“Server 已连接”判断全部数据已上传。
+笔记先保存到手机。下拉同步会上传待同步操作并拉取 Server 更新，网络失败时保留本地记录，恢复连接后重试。检查“未同步”状态确认结果，不能仅凭“已连接”判断全部数据已上传。
+
+编辑内容、记录时间、附件和回收站操作均需要同步。删除的笔记先进入回收站，可恢复；彻底删除或清空回收站后无法恢复。隐藏笔记在 App 中通过生物识别解锁查看，这不是 Server 数据加密或 CLI 标签权限隔离。
+
+新 Server 不会自动获得原 Server 的数据。切换后旧记录的修改可能返回 `note_not_found`，后续操作会等待处理；迁移应同时搬迁 Server 数据库和附件对象，而不只是修改 App 地址。
 
 已有部署或忘记 Key 时，在云服务器终端进入实际项目根目录，再读取原值，不重新生成：
 
@@ -385,7 +451,25 @@ sed -n 's/^SPROUT_API_KEY=//p' .env
 | `$SPROUT_DIR/sprout-server` | Go 程序，可重新构建 |
 | `$SPROUT_DIR` | Git 源码，不是生产数据目录 |
 
-**迁移时同时保留数据库和同目录的 `objects/`，只复制 Git 项目或 SQLite 会丢失附件。** 先停止 Sprout，再用 SQLite `.backup` 导出数据库并复制 `objects/`；备份完成后重新启动。服务运行时不要直接复制 `sprout.db`，同目录的 `-wal` 文件可能含有已提交数据。
+**迁移时同时保留数据库和同目录的 `objects/`，只复制 Git 项目或 SQLite 会丢失附件。** `objects/` 固定在数据库同级目录，`.env` 也需要安全保管。
+
+在云服务器备份（以下使用教程中的数据库路径和 systemd 服务）：
+
+```sh
+cd <实际项目目录>
+SPROUT_DIR=$(pwd)
+SPROUT_BACKUP_DIR=/var/backups/sprout/$(date +%Y%m%d-%H%M%S)
+sudo install -d -o "$(id -un)" -g "$(id -gn)" -m 700 "$SPROUT_BACKUP_DIR"
+sudo systemctl stop sprout
+sqlite3 /var/lib/sprout/sprout.db ".backup '$SPROUT_BACKUP_DIR/sprout.db'"
+cp -a /var/lib/sprout/objects "$SPROUT_BACKUP_DIR/objects"
+cp "$SPROUT_DIR/.env" "$SPROUT_BACKUP_DIR/server.env"
+chmod 600 "$SPROUT_BACKUP_DIR/sprout.db" "$SPROUT_BACKUP_DIR/server.env"
+sudo systemctl start sprout
+sudo systemctl is-active sprout
+```
+
+逐条确认成功；备份失败时先处理，不使用不完整备份迁移。暂停服务保证数据库与附件来自同一状态；运行时不要直接复制 `sprout.db`，WAL 可能包含已提交数据。
 
 迁到新服务器时，恢复数据库到配置路径并让运行 Server 的登录用户可读写；另外安全保存或重新配置 API Key，新入口单独配置 HTTPS。恢复后核对笔记和图片，再切换 DNS。
 
@@ -393,7 +477,7 @@ sed -n 's/^SPROUT_API_KEY=//p' .env
 
 ## 更新已有部署
 
-在云服务器进入实际项目目录，保留 `.env`、数据库与 `objects/`，执行：
+先按上节备份。已有项目不重新 clone、不覆盖 `.env`、不重新生成 API Key。在云服务器进入实际项目根目录，保留数据库与 `objects/`，执行：
 
 ```sh
 git pull --ff-only
@@ -408,3 +492,35 @@ sudo systemctl is-active sprout
 ```
 
 首次启用 CLI 时补充 `SPROUT_PUBLIC_ORIGIN`，按前文验证 HTTPS 与 App 同步，再在每个项目根目录运行 CLI 登录。源码构建失败时先修复，不停止原服务。
+
+网页授权 UI 来自 Server，升级 APK 不会更新服务器上的网页。修改 `.env` 后重启 Sprout；移动源码目录后更新 systemd 的 `ExecStart`，再 `daemon-reload` 并重启。
+
+## 常见问题
+
+| 现象 | 检查 |
+| --- | --- |
+| Server 启动失败 | `sudo journalctl -u sprout -n 50 --no-pager`；配置、数据目录权限和端口 |
+| App 验证成功但没有保存连接 | 点“连接服务器”；“验证连接”仅检查 |
+| App HTTP 401 | 配对码或手动填写的 Key 是否与当前 Server 一致 |
+| 终端二维码扫不出 | 放大终端并完整显示二维码，或用 `-qr-output` 生成 PNG |
+| PNG 提示文件已存在 | 命令不会覆盖已有文件，使用新的输出文件名 |
+| CLI 授权返回 503 | 配置 `SPROUT_PUBLIC_ORIGIN` 并重启 Server |
+| CLI 申请过期或 Server 不匹配 | 重新登录；App 先连接 CLI 指定的同一 Server |
+| 笔记仍“未同步” | 检查网络、凭据和 Server 版本，再下拉重试 |
+| 迁移后附件丢失 | 数据库同级的 `objects/` 是否一起恢复 |
+
+## 源码与开发
+
+App 使用 Expo / React Native，Server 使用 Go / SQLite，CLI 使用 TypeScript / Node.js。
+
+```sh
+git clone https://github.com/wuqi2753/sprout-public.git
+cd sprout-public
+pnpm install
+pnpm test
+pnpm lint
+```
+
+App 测试中的二维码回归需要 Go 1.24+。原生开发需要 Android SDK 或 Xcode，使用 `pnpm android` / `pnpm ios` 构建开发客户端，`pnpm start` 启动 Metro；正式 APK 安装使用前文 Release。
+
+Server 测试：在 `server/` 执行 `go test ./...`。CLI 开发、构建与真实 Server 联调步骤见 [CLI README](cli/README.md)。许可证见 [LICENSE](LICENSE)，第三方版权声明见 [THIRD_PARTY_LICENSES](THIRD_PARTY_LICENSES)。
