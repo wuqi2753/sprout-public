@@ -1,5 +1,3 @@
-import { ServerConnectionForm } from '@/components/server-connection-form';
-import { getServerConnectionConfig } from '@/storage/server-connection';
 // REQ-023: docs/stories/v0.2.0/REQ-023-refine-core-screen-visuals.md
 import { Image } from 'expo-image';
 import { BlurTargetView, BlurView } from 'expo-blur';
@@ -194,24 +192,7 @@ function IconButton({
 // REQ-016: docs/stories/v0.2.0/REQ-016-server-connection-form.md
 export default function HomeEntry() {
   const { openSidebar } = useLocalSearchParams<{ openSidebar?: string }>();
-  const [entry, setEntry] = useState<'loading' | 'welcome' | 'capture'>('loading');
-  const [configReadError, setConfigReadError] = useState(false);
-  useEffect(() => {
-    let active = true;
-    getServerConnectionConfig().then((config) => {
-      if (active) setEntry(config ? 'capture' : 'welcome');
-    }).catch(() => {
-      if (active) { setConfigReadError(true); setEntry('welcome'); }
-    });
-    return () => { active = false; };
-  }, []);
-  if (entry === 'loading') return null;
-  if (entry === 'capture') return <HomeScreen openSidebar={openSidebar === '1'} />;
-  return <>
-    <ServerConnectionForm onConnected={() => setEntry('capture')} onDismiss={() => setEntry('capture')} />
-    <FeedbackDialog visible={configReadError} title="无法读取服务器配置"
-      message="请重新填写连接配置并连接服务器。" onDismiss={() => setConfigReadError(false)} />
-  </>;
+  return <HomeScreen openSidebar={openSidebar === '1'} />;
 }
 
 function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
