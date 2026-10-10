@@ -7,6 +7,8 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Linking, Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { parseServerQr, validateQrConnection, type ServerQr } from '@/api/server-qr';
+import { requestCliApproval, cliPermissionLabels, cliRequestStatusMessage, type CliDeviceRequest } from '@/api/cli-device-approval';
+import { getServerConnectionConfig } from '@/storage/server-connection';
 import type { ServerConnectionConfig } from '@/api/server-connection';
 import { ThemedText } from '@/components/themed-text';
 import { useTheme } from '@/hooks/use-theme';
@@ -32,6 +34,72 @@ export function ServerQrScanner({ onClose, serverUrl, connected = false, allowPa
     const subscription = AppState.addEventListener('change', (state) => setForeground(state === 'active'));
     return () => subscription.remove();
   }, []);
+  // REQ-096: only an explicit user decision may approve a verified request.
+  const [cliRequest, setCliRequest] = useState<CliDeviceRequest>();
+  const approvalConnection = useRef<ServerConnectionConfig | undefined>(undefined);
+  const approvalController = useRef<AbortController | undefined>(undefined);
+  const liveServer = useRef({ serverUrl, connected });
+  useEffect(() => { liveServer.current = { serverUrl, connected }; }, [serverUrl, connected]);
+  const mounted = useRef(true);
+  const approvalGeneration = useRef(0);
+  const decisionNeedsQuery = useRef(false);
+  function cancelApproval() {
+    approvalGeneration.current += 1;
+    approvalController.current?.abort();
+    confirmationPending.current = false;
+  }
+  useEffect(() => { mounted.current = true; return () => { mounted.current = false; cancelApproval(); }; }, []);
+  useEffect(() => {
+    if (!foreground || !focused) {
+      cancelApproval();
+      queueMicrotask(() => {
+        if (!mounted.current) return;
+        setConnecting(false);
+        if (scanLocked.current) { setCliRequest(undefined); setMessage('操作已暂停，请重新查询或扫描。'); }
+      });
+    }
+  }, [foreground, focused]);
+  useEffect(() => {
+    if (approvalConnection.current && (approvalConnection.current.serverApiUrl !== serverUrl || !connected)) {
+      cancelApproval();
+      queueMicrotask(() => {
+        if (!mounted.current) return;
+        setConnecting(false); setCliRequest(undefined); setMessage('Server 连接已变化，请重新扫描。');
+      });
+    }
+  }, [serverUrl, connected]);
+  async function queryOrDecide(scanned: Extract<ServerQr, { type: 'cli' }>, decision?: 'approve' | 'deny') {
+    if (confirmationPending.current) return;
+    confirmationPending.current = true;
+    const generation = ++approvalGeneration.current;
+    const controller = new AbortController();
+    approvalController.current = controller;
+    setConnecting(true);
+    const current = () => mounted.current && generation === approvalGeneration.current && !controller.signal.aborted;
+    try {
+      const config = await getServerConnectionConfig();
+      if (!current()) return;
+      if (!config) throw new Error('请先连接你的 Server。');
+      validateQrConnection(scanned, config.serverApiUrl, liveServer.current.connected, false);
+      if (config.serverApiUrl !== liveServer.current.serverUrl || (approvalConnection.current && (config.serverApiUrl !== approvalConnection.current.serverApiUrl || config.apiKey !== approvalConnection.current.apiKey))) throw new Error('Server 连接已变化，请重新扫描。');
+      approvalConnection.current = config;
+      if (decision && (!cliRequest || cliRequestStatusMessage(cliRequest) || decisionNeedsQuery.current)) throw new Error('请先重新查询申请状态。');
+      const request = await requestCliApproval(config, scanned.userCode, controller.signal, decision);
+      const saved = await getServerConnectionConfig();
+      if (!current()) return;
+      if (!saved || saved.serverApiUrl !== config.serverApiUrl || saved.apiKey !== config.apiKey || liveServer.current.serverUrl !== config.serverApiUrl) throw new Error('Server 连接已变化，请重新扫描。');
+      decisionNeedsQuery.current = false;
+      setCliRequest(request);
+      setMessage(cliRequestStatusMessage(request));
+    } catch (error) {
+      if (!current()) return;
+      if (decision) decisionNeedsQuery.current = true;
+      setCliRequest(undefined);
+      setMessage(error instanceof Error ? error.message : '无法读取授权申请。');
+    } finally {
+      if (current()) { confirmationPending.current = false; setConnecting(false); }
+    }
+  }
   function scan(encoded: string) {
     if (scanLocked.current) return;
     scanLocked.current = true;
@@ -43,9 +111,10 @@ export function ServerQrScanner({ onClose, serverUrl, connected = false, allowPa
         return;
       }
       setQr(scanned);
+      if (scanned.type === 'cli') void queryOrDecide(scanned);
     } catch (error) { setMessage(error instanceof Error ? error.message : '无法读取二维码。'); }
   }
-  function rescan() { setQr(undefined); setMessage(undefined); scanLocked.current = false; }
+  function rescan() { cancelApproval(); setConnecting(false); setQr(undefined); setCliRequest(undefined); approvalConnection.current = undefined; decisionNeedsQuery.current = false; setMessage(undefined); scanLocked.current = false; }
   async function enableCamera() {
     try {
       if (permission?.canAskAgain === false) await Linking.openSettings();
@@ -63,7 +132,7 @@ export function ServerQrScanner({ onClose, serverUrl, connected = false, allowPa
         await onConnect({ serverApiUrl: qr.serverUrl, apiKey: qr.apiKey });
         onClose();
       } else {
-        setMessage(Date.now() >= qr.expiresAt ? '二维码已过期，请重新生成。' : 'CLI 授权审批尚未接入，未授予任何权限。');
+        throw new Error('CLI 申请应通过审批按钮提交。');
       }
     } catch (error) {
       setMessage(error instanceof Error ? error.message : '无法连接 Server，请重试。');
@@ -102,9 +171,19 @@ export function ServerQrScanner({ onClose, serverUrl, connected = false, allowPa
       </View>}
       {(qr || message) && <View style={styles.overlay}><View accessibilityViewIsModal style={[styles.card, { backgroundColor: theme.surface }]}><ScrollView style={{ flexGrow: 0, flexShrink: 1 }}>
         <ThemedText accessibilityRole="header" style={styles.title}>{message ? '扫码提示' : qr?.type === 'pairing' ? '连接此 Server？' : '允许 CLI 连接？'}</ThemedText>
-        <ThemedText style={styles.details}>{message ?? (qr?.type === 'pairing' ? `${serverUrl ? '将更换当前连接。\n' : ''}${qr.serverUrl}\n请确认这是你自己的 Server。` : `${new URL(qr!.serverUrl).host}\n核对码：${qr!.userCode}\n请与 CLI 页面核对。\n请求权限待 Server 验证，当前不会授予权限。`)}</ThemedText>
+        <ThemedText style={styles.details}>{message ?? (qr?.type === 'pairing' ? `${serverUrl ? '将更换当前连接。\n' : ''}${qr.serverUrl}\n请确认这是你自己的 Server。` : `${new URL(qr!.serverUrl).host}\n${cliRequest ? `${cliRequest.clientId}\n核对码：${cliRequest.userCode}\n请与 CLI 页面核对。\n${cliRequest.scope.map((scope) => cliPermissionLabels[scope]).join('\n')}\n有效至：${new Date(cliRequest.expiresAt).toLocaleTimeString()}` : '正在查询申请权限…'}`)}</ThemedText>
         </ScrollView>
-        <View style={styles.actions}><ScanButton label={message ? "关闭" : qr?.type === "cli" ? "拒绝" : "取消"} onPress={onClose} disabled={connecting} />{message && onManualEntry && <ScanButton label="手动填写" onPress={onManualEntry} />}{message && <ScanButton label="重新扫描" onPress={rescan} primary />}{qr && !message && <ScanButton label={connecting ? "连接中…" : qr.type === "cli" ? "允许" : "连接"} onPress={() => { void confirmScan(); }} disabled={connecting} primary />}</View>
+        <View style={styles.actions}>
+          <ScanButton label="关闭" onPress={onClose} disabled={connecting} />
+          {message && qr?.type === 'cli' && <ScanButton label={connecting ? '查询中…' : '重新查询'} onPress={() => { void queryOrDecide(qr); }} disabled={connecting} />}
+          {message && <ScanButton label="重新扫描" onPress={rescan} disabled={connecting} primary />}
+          {message && onManualEntry && <ScanButton label="手动填写" onPress={onManualEntry} disabled={connecting} />}
+          {qr?.type === 'cli' && cliRequest?.status === 'pending' && !message && <>
+            <ScanButton label="拒绝" onPress={() => { void queryOrDecide(qr, 'deny'); }} disabled={connecting} />
+            <ScanButton label={connecting ? '处理中…' : '允许'} onPress={() => { void queryOrDecide(qr, 'approve'); }} disabled={connecting} primary />
+          </>}
+          {qr?.type === 'pairing' && !message && <ScanButton label={connecting ? '连接中…' : '连接'} onPress={() => { void confirmScan(); }} disabled={connecting} primary />}
+        </View>
       </View></View>}
       </SafeAreaView>
     </View>

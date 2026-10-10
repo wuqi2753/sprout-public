@@ -157,22 +157,69 @@ test('scanner exposes authentication failure without closing or leaking credenti
   assert.equal(flow.stored().apiKey, 'old-fixture-key');
 });
 
-test('CLI confirmation remains a placeholder and never passes credentials to connection callback', async () => {
-  let message;
-  const flow = setup();
-  const qrApi = apiModule('server-qr', { './server-connection': flow.api });
-  const scanner = vm.createContext({
-    ...qrApi, Error, Date, confirmationPending: { current: false },
-    qr: { type: 'cli', serverUrl: 'https://old.example.com', userCode: 'ABCD-1234', expiresAt: Date.now() + 60000 },
-    serverUrl: 'https://old.example.com', connected: true, allowPairing: true,
-    setQr: () => {}, setConnecting: () => {}, setMessage: (value) => { message = value; },
-    onConnect: () => assert.fail('CLI must not save connection credentials'),
-    onClose: () => assert.fail('unimplemented CLI approval must not appear successful'),
-  });
-  vm.runInContext(scannerCallbacks, scanner);
-  await vm.runInContext('confirmScan()', scanner);
-  assert.match(message, /尚未接入/);
-  assert.equal(flow.calls.length, 0);
+// REQ-096: exercise the scanner's actual async callbacks.
+const approvalCallbacks = connectionCallbacks('server-qr-scanner.tsx', ['queryOrDecide', 'cancelApproval']);
+function approvalScanner(options = {}) {
+ const calls = [];
+ const config = { serverApiUrl: 'https://old.example.com', apiKey: 'fixture-key' };
+ const qr = { type: 'cli', serverUrl: config.serverApiUrl, userCode: 'ABCD-1234', expiresAt: Date.now() + 60000 };
+ const request = { userCode: qr.userCode, clientId: 'sprout-cli', scope: ['notes:read'], expiresAt: qr.expiresAt, status: 'pending' };
+ const context = vm.createContext({
+  Error, AbortController, Date, confirmationPending: { current: false }, approvalGeneration: { current: 0 },
+  mounted: { current: true }, approvalController: { current: undefined }, approvalConnection: { current: undefined },
+  liveServer: { current: { serverUrl: config.serverApiUrl, connected: true } }, decisionNeedsQuery: { current: false },
+  getServerConnectionConfig: async () => options.config ?? config,
+  validateQrConnection: (scan, url) => { if (scan.serverUrl !== url) throw new Error('其他 Server'); },
+  cliRequestStatusMessage: (value) => value.expiresAt <= Date.now() ? '过期' : value.status === 'pending' ? undefined : value.status,
+  requestCliApproval: async (_, code, signal, decision) => {
+   calls.push(decision ?? 'query');
+   if (options.request) return options.request(decision);
+   return { ...request, status: decision === 'approve' ? 'approved' : decision === 'deny' ? 'denied' : 'pending' };
+  },
+  setConnecting: () => {}, setCliRequest: (value) => { context.cliRequest = value; },
+  setMessage: (value) => { context.message = value; }, qr,
+ });
+ vm.runInContext(approvalCallbacks, context);
+ return { context, calls, config, request };
+}
+test('REQ-096 scanner queries before explicit approval/rejection and never saves connection', async () => {
+ for (const decision of ['approve', 'deny']) {
+  const scanner = approvalScanner();
+  await vm.runInContext('queryOrDecide(qr)', scanner.context);
+  assert.deepEqual(scanner.calls, ['query']);
+  assert.equal(scanner.context.cliRequest.status, 'pending');
+  await vm.runInContext(`queryOrDecide(qr, '${decision}')`, scanner.context);
+  assert.deepEqual(scanner.calls, ['query', decision]);
+  assert.equal(scanner.context.message, decision === 'approve' ? 'approved' : 'denied');
+ }
+});
+test('REQ-096 duplicate requests and late responses after cancellation cannot update UI', async () => {
+ let release;
+ const scanner = approvalScanner({ request: () => new Promise((resolve) => { release = resolve; }) });
+ const first = vm.runInContext('queryOrDecide(qr)', scanner.context);
+ await Promise.resolve(); await Promise.resolve();
+ await vm.runInContext('queryOrDecide(qr)', scanner.context);
+ assert.deepEqual(scanner.calls, ['query']);
+ vm.runInContext('cancelApproval()', scanner.context);
+ release(scanner.request); await first;
+ assert.equal(scanner.context.cliRequest, undefined);
+});
+test('REQ-096 uncertain approval requires query, expired and changed connections cannot approve', async () => {
+ const scanner = approvalScanner({ request: async (decision) => { if (decision) throw new Error('结果未确认'); return scanner.request; } });
+ await vm.runInContext('queryOrDecide(qr)', scanner.context);
+ await vm.runInContext("queryOrDecide(qr, 'approve')", scanner.context);
+ assert.equal(scanner.context.decisionNeedsQuery.current, true);
+ await vm.runInContext("queryOrDecide(qr, 'deny')", scanner.context);
+ assert.deepEqual(scanner.calls, ['query', 'approve']);
+ await vm.runInContext('queryOrDecide(qr)', scanner.context);
+ assert.equal(scanner.context.decisionNeedsQuery.current, false);
+ scanner.context.cliRequest.expiresAt = 0;
+ await vm.runInContext("queryOrDecide(qr, 'approve')", scanner.context);
+ assert.deepEqual(scanner.calls, ['query', 'approve', 'query']);
+ scanner.config.apiKey = 'changed-key';
+ scanner.context.approvalConnection.current = { ...scanner.config, apiKey: 'original-key' };
+ await vm.runInContext('queryOrDecide(qr)', scanner.context);
+ assert.match(scanner.context.message, /变化/);
 });
 
 const replacementCallbacks = connectionCallbacks('server-connection-form.tsx', ['requestConnection', 'confirmReplacement']);
