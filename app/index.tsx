@@ -61,32 +61,67 @@ import { emptySearchFilters, hasSearchFilters, matchesMemoSearch, sortSearchMemo
 const now = new Date();
 type TextSelection = { start: number; end: number };
 
-function MemoContent({ content, numberOfLines }: { content: string; numberOfLines?: number }) {
+// REQ-010: preserve paragraph breaks and clip at the measured sixth text line.
+function MemoContent({ content, numberOfLines, onOverflowChange }: { content: string; numberOfLines?: number; onOverflowChange: (overflow: boolean) => void }) {
   const theme = useTheme();
-  const memoSegments = content.split(/(#[^\s#]*)/g);
+  const { width, fontScale } = useWindowDimensions();
+  const [measuredPreview, setMeasuredPreview] = useState<{ content: string; width: number; fontScale: number; height: number }>();
+  const [tagWidths, setTagWidths] = useState<Record<string, number>>({});
+  const [textCapHeight, setTextCapHeight] = useState<{ fontScale: number; height: number }>();
+  const textLineHeight = 24 * fontScale + 3;
+  const tagHeight = 15 * fontScale + 2;
+  const capHeight = textCapHeight?.fontScale === fontScale ? textCapHeight.height : 12 * fontScale;
+  const normalizedContent = content.replace(/\r\n?/g, "\n");
+  const memoSegments = normalizedContent.split(/(#[^\s#]*)/g);
+  const previewHeight = measuredPreview?.content === content && measuredPreview.width === width && measuredPreview.fontScale === fontScale
+    ? measuredPreview.height : 6 * textLineHeight;
+  const updatePreviewMeasurement = (height: number, overflow: boolean) => {
+    setMeasuredPreview((previous) => previous?.content === content && previous.width === width && previous.fontScale === fontScale && previous.height === height
+      ? previous : { content, width, fontScale, height });
+    onOverflowChange(overflow);
+  };
 
   return (
-    <View
-      style={[
-        styles.memoContentFlow,
-        numberOfLines ? { maxHeight: numberOfLines * 24, overflow: 'hidden' } : undefined,
-      ]}>
-      {memoSegments.flatMap((segment, index) =>
-        segment.startsWith('#') ? (
-          <View
-            key={`${index}-${segment}`}
-            style={[styles.inlineTagPill, { backgroundColor: theme.tagBackground }]}>
-            <ThemedText style={[styles.inlineTag, { color: theme.tag }]}>{segment}</ThemedText>
+    <View style={numberOfLines ? { maxHeight: previewHeight, overflow: "hidden" } : undefined}>
+      <View pointerEvents="none" accessible={false} accessibilityElementsHidden importantForAccessibility="no-hide-descendants"
+        style={{ position: 'absolute', top: 0, left: 0, right: 0, opacity: 0 }}>
+        {[...new Set(memoSegments.filter((segment) => segment.startsWith('#')))].map((tag) => (
+          <ThemedText key={tag} style={[styles.inlineTag, { alignSelf: 'flex-start' }]} onLayout={(event) => {
+            const tagWidth = Math.ceil(event.nativeEvent.layout.width);
+            const key = `${fontScale}:${tag}`;
+            setTagWidths((previous) => previous[key] === tagWidth ? previous : { ...previous, [key]: tagWidth });
+          }}>{tag}</ThemedText>
+        ))}
+      </View>
+      <ThemedText style={[styles.memoContent, { flexShrink: 0, lineHeight: textLineHeight / fontScale }]} onLayout={(event) => {
+        // React Native Web does not emit onTextLayout; its full text height remains measurable.
+        if (Platform.OS === 'web') {
+          const height = 6 * textLineHeight;
+          updatePreviewMeasurement(height, event.nativeEvent.layout.height > height + 1);
+        }
+      }} onTextLayout={(event) => {
+        const lines = event.nativeEvent.lines;
+        const measuredCapHeight = lines[0]?.capHeight;
+        if (measuredCapHeight > 0) {
+          setTextCapHeight((previous) => previous?.fontScale === fontScale && previous.height === measuredCapHeight
+            ? previous : { fontScale, height: measuredCapHeight });
+        }
+        const sixthLine = lines[5];
+        const height = sixthLine ? sixthLine.y + sixthLine.height : 6 * textLineHeight;
+        updatePreviewMeasurement(height, lines.length > 6);
+      }}>
+        {memoSegments.map((segment, index) => segment.startsWith("#") ? (
+          <View key={index} style={[styles.inlineTagPill, {
+            width: (tagWidths[`${fontScale}:${segment}`] ?? segment.length * 12 * fontScale) + 8,
+            height: tagHeight,
+            // Native inline views sit on the text baseline; center the pill on the glyphs.
+            transform: [{ translateY: (tagHeight - capHeight) / 2 }],
+            backgroundColor: theme.memoTagBackground,
+          }]}>
+            <ThemedText style={[styles.inlineTag, { color: theme.memoTag }]}>{segment}</ThemedText>
           </View>
-        ) : segment
-            .split(/([\u4e00-\u9fff]|[^\s\u4e00-\u9fff]+\s*)/g)
-            .filter(Boolean)
-            .map((textSegment, textIndex) => (
-              <ThemedText key={`${index}-${textIndex}-${textSegment}`} style={styles.memoContent}>
-                {textSegment}
-              </ThemedText>
-            )),
-      )}
+        ) : segment)}
+      </ThemedText>
     </View>
   );
 }
@@ -210,12 +245,12 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
   const [composerInputHeight, setComposerInputHeight] = useState(72);
   const [composerScrollOffset, setComposerScrollOffset] = useState(0);
   const [composerWidth, setComposerWidth] = useState(0);
-  const composerBlurTarget = useRef<View>(null);
   const [content, setContent] = useState('');
   const [imageUris, setImageUris] = useState<string[]>([]);
   const [fileAttachments, setFileAttachments] = useState<FileAttachment[]>([]);
   const [importingFile, setImportingFile] = useState(false);
   const [composerSelection, setComposerSelection] = useState<TextSelection>({ start: 0, end: 0 });
+  const composerBlurTarget = useRef<View>(null);
   const [composerOpen, setComposerOpen] = useState(false);
   const [keyboardHeight, setKeyboardHeight] = useState(0);
   const [memos, setMemos] = useState<Memo[]>([]);
@@ -296,6 +331,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
   const [openMemoMenuId, setOpenMemoMenuId] = useState<string | null>(null);
   const [memoMenuPosition, setMemoMenuPosition] = useState({ left: 0, top: 0 });
   const [expandedMemoIds, setExpandedMemoIds] = useState<string[]>([]);
+  const [overflowingMemoIds, setOverflowingMemoIds] = useState<string[]>([]);
   const [searchVisible, setSearchVisible] = useState(false);
   const [query, setQuery] = useState('');
   const [searchFilters, setSearchFilters] = useState<MemoSearchFilters>(emptySearchFilters);
@@ -507,7 +543,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
   const suggestedTags = tagDraft
     ? tags
         .filter(({ name }) => name.toLocaleLowerCase().includes(tagDraft.query.toLocaleLowerCase()))
-        .slice(0, 5)
+        .slice(0, 3)
     : [];
 
   useEffect(() => {
@@ -886,10 +922,11 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
             </SafeAreaView>
       }>
     <SafeAreaView style={[styles.screen, { backgroundColor: theme.background }]}>
-      <BlurTargetView ref={composerBlurTarget} style={styles.screen}>
+      <BlurTargetView ref={composerBlurTarget} style={[styles.screen, { backgroundColor: theme.background }]}>
+        <View collapsable={false} pointerEvents="none" style={[StyleSheet.absoluteFill, { backgroundColor: theme.background }]} />
         <KeyboardAvoidingView
           behavior={Platform.OS === 'ios' ? 'padding' : undefined}
-          style={styles.screen}>
+          style={[styles.screen, { backgroundColor: theme.background }]}>
           <View style={styles.contentColumn}>
             {!searchVisible && <View style={styles.header}>
               <View style={styles.brandGroup}>
@@ -972,7 +1009,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
               <View style={styles.memoList}>
                 {filteredMemos.map((memo) => {
                   const isExpanded = expandedMemoIds.includes(memo.id);
-                  const canExpand = memo.content.length > 90;
+                  const canExpand = overflowingMemoIds.includes(memo.id);
                   return (
                   <View key={memo.id} style={[styles.memo, { borderColor: theme.border, backgroundColor: theme.surface }]}>
                     <View style={styles.memoHeader}>
@@ -992,7 +1029,11 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
                         <SymbolView name={{ ios: 'ellipsis', android: 'more_horiz', web: 'more_horiz' }} size={20} tintColor={theme.textSecondary} />
                       </Pressable>
                     </View>
-                    {memo.content.length > 0 && <MemoContent content={memo.content} numberOfLines={canExpand && !isExpanded ? 3 : undefined} />}
+                    {memo.content.length > 0 && <MemoContent content={memo.content} numberOfLines={!isExpanded ? 6 : undefined}
+                      onOverflowChange={(overflow) => setOverflowingMemoIds((currentIds) => {
+                        if (currentIds.includes(memo.id) === overflow) return currentIds;
+                        return overflow ? [...currentIds, memo.id] : currentIds.filter((id) => id !== memo.id);
+                      })} />}
                     <MemoImages
                       imageUris={memo.imageUris}
                       onOpen={(index) => {
@@ -1014,9 +1055,10 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
                       <Pressable
                         accessibilityLabel={isExpanded ? '收起记录正文' : '展开记录正文'}
                         accessibilityRole="button"
+                        hitSlop={{ top: 12, bottom: 12, left: 0, right: 12 }}
                         onPress={() => setExpandedMemoIds((currentIds) => isExpanded ? currentIds.filter((id) => id !== memo.id) : [...currentIds, memo.id])}
                         style={({ pressed }) => [styles.expandButton, pressed && styles.pressed]}>
-                        <ThemedText style={[styles.expandLabel, { color: theme.accent }]}>{isExpanded ? '收起' : '展开'}</ThemedText>
+                        <ThemedText style={[styles.expandLabel, { color: theme.memoExpandText }]}>{isExpanded ? '收起' : '展开'}</ThemedText>
                       </Pressable>
                     )}
                   </View>
@@ -1069,14 +1111,8 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
 
       {!showingHidden && composerOpen && (
         <View style={[styles.composerModal, { bottom: keyboardHeight }]}>
-          <BlurView
-            blurTarget={composerBlurTarget}
-            blurMethod="dimezisBlurViewSdk31Plus"
-            intensity={70}
-            pointerEvents="none"
-            style={styles.composerBlur}
-            tint={theme === Colors.dark ? 'dark' : 'light'}
-          />
+          <BlurView blurTarget={composerBlurTarget} blurMethod="dimezisBlurViewSdk31Plus" intensity={12}
+            pointerEvents="none" style={StyleSheet.absoluteFill} tint={theme === Colors.dark ? 'dark' : 'light'} />
           <Pressable accessibilityLabel="关闭记录输入" accessibilityRole="button" onPress={closeComposer} style={styles.composerBackdrop} />
           <View ref={composerSheetRef} onLayout={(event) => setComposerWidth(event.nativeEvent.layout.width)} style={[styles.composerSheet, { height: Math.min(184 + Math.ceil(imageUris.length / 3) * 68 + fileAttachments.length * 76, Math.max(184, windowHeight - keyboardHeight - 80)) }, { backgroundColor: theme.surface, borderColor: theme.border }]}>
             <View style={[styles.sheetHandle, { backgroundColor: theme.border }]} />
@@ -1417,8 +1453,7 @@ const styles = StyleSheet.create({
   iconOpticalStart: { transform: [{ translateX: -3 }] },
   pressed: { opacity: 0.72 },
   composerModal: { ...StyleSheet.absoluteFill, justifyContent: 'flex-end', alignItems: 'center', zIndex: 10 },
-  composerBlur: { ...StyleSheet.absoluteFill },
-  composerBackdrop: { ...StyleSheet.absoluteFill, backgroundColor: 'rgba(0, 0, 0, 0.18)' },
+  composerBackdrop: { ...StyleSheet.absoluteFill },
   composerSheet: { width: '100%', maxWidth: MaxContentWidth, maxHeight: '55%', height: 184, alignSelf: 'center', borderTopLeftRadius: 24, borderTopRightRadius: 24, borderWidth: StyleSheet.hairlineWidth, paddingHorizontal: 12, paddingTop: Spacing.two, paddingBottom: Spacing.four },
   sheetHandle: { width: 36, height: 4, borderRadius: 2, alignSelf: 'center', marginBottom: Spacing.two },
   composerMeasurement: { fontSize: 16, lineHeight: 24, fontWeight: '400', includeFontPadding: false },
@@ -1473,7 +1508,7 @@ const styles = StyleSheet.create({
     borderRadius: 16,
     paddingHorizontal: Spacing.three,
     paddingTop: 12,
-    paddingBottom: Spacing.three,
+    paddingBottom: 12,
     gap: 6,
   },
   memoHeader: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
@@ -1484,7 +1519,6 @@ const styles = StyleSheet.create({
   memoMenuItem: { flex: 1, minWidth: 48, minHeight: 56, alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 6, borderRadius: 8 },
   memoMenuLabel: { fontSize: 14, lineHeight: 20, fontWeight: '600', textAlign: 'center' },
   memoTime: { flexShrink: 1, fontSize: 12, lineHeight: 18, fontWeight: '400' },
-  memoContentFlow: { flexDirection: 'row', flexWrap: 'wrap', alignItems: 'center', rowGap: 3 },
   memoContent: { flexShrink: 1, fontSize: 16, lineHeight: 24, fontWeight: '400' },
   memoImage: { width: 120, height: 180, borderRadius: 6, marginTop: 10, overflow: 'hidden' },
   memoImageContent: { width: '100%', height: '100%' },
@@ -1494,10 +1528,10 @@ const styles = StyleSheet.create({
   imagePreviewPage: { height: '100%', alignItems: 'center', justifyContent: 'center' },
   imagePreviewCounter: { position: 'absolute', top: 58, alignSelf: 'center', color: '#FFFFFF', fontSize: 14, lineHeight: 20 },
   imagePreviewClose: { position: 'absolute', top: 44, right: 18, width: 48, height: 48, alignItems: 'center', justifyContent: 'center', borderRadius: 24, backgroundColor: 'rgba(0, 0, 0, 0.42)' },
-  inlineTagPill: { flexShrink: 0, marginHorizontal: 2, borderRadius: 6, paddingHorizontal: 4, paddingVertical: 1 },
-  inlineTag: { fontSize: 12, lineHeight: 15, fontWeight: '400' },
-  expandButton: { alignSelf: 'flex-start', minHeight: 44, justifyContent: 'center' },
-  expandLabel: { fontSize: 14, lineHeight: 20, fontWeight: '600' },
+  inlineTagPill: { borderRadius: 6, paddingHorizontal: 4, paddingVertical: 1, overflow: 'hidden' },
+  inlineTag: { fontSize: 12, lineHeight: 15, fontWeight: '400', includeFontPadding: false },
+  expandButton: { alignSelf: 'flex-start', minHeight: 20, justifyContent: 'center' },
+  expandLabel: { fontSize: 14, lineHeight: 20, fontWeight: '400' },
   emptyState: {
     borderWidth: StyleSheet.hairlineWidth,
     borderRadius: 16,

@@ -280,8 +280,8 @@ export default function ExploreScreen() {
                               styles.memoTag,
                               pressed && styles.pressed,
                             ]}>
-                            <View style={[styles.memoTagPill, { backgroundColor: theme.tagBackground }]}>
-                              <ThemedText style={[styles.memoTagLabel, { color: theme.tag }]}>
+                            <View style={[styles.memoTagPill, { backgroundColor: theme.memoTagBackground }]}>
+                              <ThemedText style={[styles.memoTagLabel, { color: theme.memoTag }]}>
                                 #{tag}
                               </ThemedText>
                             </View>

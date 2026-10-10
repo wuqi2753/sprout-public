@@ -1,0 +1,35 @@
+{
+  "name": "@sprout-native/cli",
+  "version": "0.6.0",
+  "description": "Workspace material capture client for a personal Sprout server",
+  "type": "module",
+  "bin": {
+    "sprout": "dist/main.js"
+  },
+  "engines": {
+    "node": ">=22.14.0"
+  },
+  "os": [
+    "darwin",
+    "linux"
+  ],
+  "files": [
+    "dist",
+    "README.md",
+    "PROTOCOL.md"
+  ],
+  "scripts": {
+    "build": "tsc && chmod +x dist/main.js",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "prepack": "npm run build",
+    "test:distribution": "npm run build && node --test tests/distribution.test.mjs"
+  },
+  "devDependencies": {
+    "@types/node": "22.14.0",
+    "typescript": "6.0.3"
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  }
+}

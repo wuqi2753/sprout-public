@@ -51,6 +51,9 @@ func TestDevicePageLifecycle(t *testing.T) {
 		t.Fatalf("%d %s", w.Code, w.Body.String())
 	}
 	body := w.Body.String()
+	if !strings.Contains(body, `class="brand" aria-label="Sprout"`) || !strings.Contains(body, `<span>Sprout</span>`) || !strings.Contains(html.UnescapeString(body), base64.StdEncoding.EncodeToString(deviceLogoPNG)) {
+		t.Fatal("App logo or name is missing")
+	}
 	if !strings.Contains(body, `data-remaining="120">02:00`) || strings.Contains(body, "有效至") {
 		t.Fatal("incorrect countdown")
 	}
@@ -69,7 +72,7 @@ func TestDevicePageLifecycle(t *testing.T) {
 			t.Fatalf("page contains forbidden value %s", secret)
 		}
 	}
-	encoded := strings.SplitN(strings.SplitN(body, "data:image/png;base64,", 2)[1], `"`, 2)[0]
+	encoded := strings.SplitN(strings.SplitN(body, `<img class="qr" alt="CLI 授权申请二维码" src="data:image/png;base64,`, 2)[1], `"`, 2)[0]
 	pngBytes, err := base64.StdEncoding.DecodeString(html.UnescapeString(encoded))
 	if err != nil {
 		t.Fatal(err)
@@ -125,6 +128,9 @@ func TestDevicePageErrorsAndEscape(t *testing.T) {
 		h.ServeHTTP(w, httptest.NewRequest("GET", "/oauth/device?user_code=ABCD-1234", nil))
 		if w.Code != 200 || strings.Contains(w.Body.String(), `class="qr"`) || !strings.Contains(w.Body.String(), `data-state="`+status+`"`) {
 			t.Fatal(status, w.Code)
+		}
+		if !strings.Contains(w.Body.String(), `class="brand" aria-label="Sprout"`) {
+			t.Fatal("result page is missing App branding", status)
 		}
 		if _, err := store.database.Exec(`DELETE FROM oauth_device_requests`); err != nil {
 			t.Fatal(err)

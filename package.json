@@ -1,7 +1,7 @@
 {
   "name": "sprout",
   "main": "expo-router/entry",
-  "version": "1.5.0",
+  "version": "1.5.1",
   "dependencies": {
     "@expo-google-fonts/caveat": "^0.4.2",
     "@expo/ui": "~57.0.19",
@@ -58,6 +58,7 @@
     "ios": "expo run:ios",
     "web": "expo start --web",
     "lint": "expo lint",
+    "test:memo-layout": "node --test tests/unit/memo-content-layout.test.mjs",
     "test": "tsc --ignoreConfig src/sync/memo-outbox-core.ts --outDir .tmp/test-build --target es2022 --module nodenext --moduleResolution nodenext --skipLibCheck && node --test tests/unit/*.test.mjs tests/e2e/*.test.mjs"
   },
   "private": true

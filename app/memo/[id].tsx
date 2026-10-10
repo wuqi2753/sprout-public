@@ -1,6 +1,7 @@
 import { SymbolView } from 'expo-symbols';
 import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
-import { useEffect, useRef, useState } from 'react';
+import { cloneElement, useEffect, useMemo, useRef, useState } from 'react';
+import { useMentions, type PatternsConfig } from 'react-native-controlled-mentions';
 import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, TextInput, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as Clipboard from 'expo-clipboard';
@@ -53,7 +54,6 @@ export default function EditMemoScreen() {
   const [inputHeight, setInputHeight] = useState(52);
   const [keyboardVisible, setKeyboardVisible] = useState(false);
   const [editorAvailableHeight, setEditorAvailableHeight] = useState(0);
-  const [editorContentHeight, setEditorContentHeight] = useState(0);
   const [menuOpen, setMenuOpen] = useState(false);
   const [historyTags, setHistoryTags] = useState<string[]>([]);
   const inputRef = useRef<TextInput>(null);
@@ -71,7 +71,14 @@ export default function EditMemoScreen() {
     || imageUris.some((uri, index) => uri !== memo!.imageUris[index]) || fileAttachments.length !== memo!.fileAttachments.length || fileAttachments.some((file, index) => file.uri !== memo!.fileAttachments[index]?.uri || file.name !== memo!.fileAttachments[index]?.name));
   const tagDraft = findTagDraft(content, selection.start);
   const suggestedTags = !hiddenMemoLocked && tagDraft
-    ? historyTags.filter((name) => name.toLocaleLowerCase().includes(tagDraft.query.toLocaleLowerCase())).slice(0, 5) : [];
+    ? historyTags.filter((name) => name.toLocaleLowerCase().includes(tagDraft.query.toLocaleLowerCase())).slice(0, 3) : [];
+  // REQ-047: native text spans color tags without pill padding or changing saved text.
+  const editorPatterns = useMemo<PatternsConfig>(() => ({
+    tag: { pattern: /(#[^\s#]*)/g, textStyle: { color: theme.memoTag } },
+  }), [theme.memoTag]);
+  const { textInputProps: editorTextInputProps } = useMentions({
+    value: content, onChange: setContent, onSelectionChange: setSelection, patternsConfig: editorPatterns,
+  });
 
   useEffect(() => {
     let active = true;
@@ -310,26 +317,29 @@ export default function EditMemoScreen() {
           </Pressable>
         </View>
         <View ref={editorBodyRef} style={styles.editorBody} onLayout={(event) => { setEditorAvailableHeight(event.nativeEvent.layout.height); setEditorWidth(event.nativeEvent.layout.width); }}>
-        <ScrollView style={keyboardVisible ? { height: Math.min(editorContentHeight || 184, editorAvailableHeight || 184) } : styles.editorContent}
+        <ScrollView style={styles.editorContent}
           scrollEventThrottle={16} onScroll={(event) => setEditorScrollOffset(event.nativeEvent.contentOffset.y)}
-          onContentSizeChange={(_width, height) => setEditorContentHeight(height)} contentContainerStyle={styles.editorContentContainer}
+          contentContainerStyle={styles.editorContentContainer}
           keyboardShouldPersistTaps="handled" keyboardDismissMode={Platform.OS === 'ios' ? 'interactive' : 'on-drag'}>
         <TextInput
+          {...editorTextInputProps}
           ref={inputRef}
           accessibilityLabel={fileAttachments.length ? '编辑记录说明，不修改文件内容' : '编辑记录正文'}
           editable={Boolean(memo) && !saving}
           multiline
-          onChangeText={setContent}
-          onSelectionChange={(event) => setSelection(event.nativeEvent.selection)}
           onContentSizeChange={(event) => setInputHeight(Math.max(52, Math.ceil(event.nativeEvent.contentSize.height)))}
           placeholder="记录此刻的想法"
           placeholderTextColor={theme.textSecondary}
-          selectionColor={theme.accent}
+          selectionColor={theme.tagDragBackground}
+          cursorColor={theme.textSecondary}
           scrollEnabled={false}
-          style={[styles.input, { height: inputHeight, color: theme.text }]}
+          // REQ-047: native intrinsic sizing avoids a contentSize -> height layout feedback loop.
+          style={[styles.input, styles.inputMeasurement, { color: theme.text }]}
           textAlignVertical="top"
-          value={content}
-        />
+        >
+          {/* REQ-047: Android nested Text does not inherit TextInput font metrics. */}
+          {cloneElement(editorTextInputProps.children, { style: [styles.inputMeasurement, { color: theme.text }] })}
+        </TextInput>
         {/* REQ-047: draft attachments are editable; the file body stays untouched. */}
         {imageUris.length > 0 && <View style={styles.images}>
           {imageUris.map((uri, index) => <View key={`${uri}-${index}`} style={styles.thumbnail}>
@@ -368,7 +378,7 @@ export default function EditMemoScreen() {
         </ScrollView>
         {suggestedTags.length > 0 && keyboardVisible && <CaretTagSuggestions content={content} cursor={selection.start}
           tags={suggestedTags} onSelect={selectSuggestedTag} inputRef={inputRef} viewportRef={editorBodyRef}
-          layoutKey={`${editorWidth}:${inputHeight}:${editorAvailableHeight}:${editorContentHeight}:${editorScrollOffset}`}
+          layoutKey={`${editorWidth}:${inputHeight}:${editorAvailableHeight}:${editorScrollOffset}`}
           textStyle={styles.inputMeasurement} />}
         </View>
         <MemoEditorToolbar disabled={!memo || saving || choosingAttachment} imageCount={imageUris.length}
@@ -409,10 +419,10 @@ const styles = StyleSheet.create({
   titleGroup: { flex: 1, alignItems: 'center', gap: 1 },
   savedAt: { fontSize: 11, lineHeight: 16 },
   editorContent: { flex: 1 },
-  editorBody: { flex: 1, minHeight: 0, justifyContent: 'flex-end' },
+  editorBody: { flex: 1, minHeight: 0 },
   editorContentContainer: { paddingHorizontal: Spacing.three, paddingTop: Spacing.three, paddingBottom: 12 },
-  inputMeasurement: { fontSize: 17, lineHeight: 26, includeFontPadding: false },
-  input: { includeFontPadding: false, minHeight: 52, padding: 0, fontSize: 17, lineHeight: 26 },
+  inputMeasurement: { fontSize: 17, lineHeight: 26, fontWeight: '400', includeFontPadding: false },
+  input: { minHeight: 52, padding: 0 },
   fileRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12, paddingVertical: 8, paddingLeft: 12, paddingRight: 4, borderWidth: StyleSheet.hairlineWidth, borderRadius: 16 },
   fileIcon: { width: 40, height: 44, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },
   fileName: { flex: 1, minWidth: 0, fontSize: 14, lineHeight: 21, fontWeight: '500' },

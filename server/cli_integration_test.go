@@ -55,7 +55,23 @@ func TestCLIRealServerSync(t *testing.T) {
 		t.Fatal(err)
 	}
 	fields := issued.body.(map[string]any)
-	saved := map[string]any{"server": server.URL, "access_token": fields["access_token"], "refresh_token": fields["refresh_token"], "expires_at": time.Now().UnixMilli() + 1000, "uncertain": false}
+	// REQ-099: seed a private workspace credential, not the old Server-wide file.
+	workspaceID := "8e6a4a42-f68d-421e-9626-26f2e9901c5c"
+	if err := os.MkdirAll(filepath.Join(workspace, ".sprout"), 0700); err != nil {
+		t.Fatal(err)
+	}
+	identity, err := json.Marshal(map[string]any{"schema": 1, "workspace_id": workspaceID, "root_hash": tokenHash(workspace)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, ".sprout", "identity.json"), identity, 0600); err != nil {
+		t.Fatal(err)
+	}
+	credentials = filepath.Join(credentials, "workspaces", workspaceID)
+	if err := os.MkdirAll(credentials, 0700); err != nil {
+		t.Fatal(err)
+	}
+	saved := map[string]any{"server": server.URL, "workspace_id": workspaceID, "access_token": fields["access_token"], "refresh_token": fields["refresh_token"], "expires_at": time.Now().UnixMilli() + 1000, "uncertain": false}
 	encoded, err := json.Marshal(saved)
 	if err != nil {
 		t.Fatal(err)
@@ -65,10 +81,13 @@ func TestCLIRealServerSync(t *testing.T) {
 	}
 	run := func(args ...string) string {
 		t.Helper()
+		if args[0] == "tags" || args[0] == "logout" {
+			args = append(args, "--workspace", workspace)
+		}
 		ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cancel()
 		command := exec.CommandContext(ctx, "node", append([]string{entry}, args...)...)
-		command.Env = append(os.Environ(), "SPROUT_CLI_CONFIG_DIR="+credentials)
+		command.Env = append(os.Environ(), "SPROUT_CLI_CONFIG_DIR="+filepath.Dir(filepath.Dir(credentials)))
 		output, err := command.CombinedOutput()
 		if err != nil {
 			t.Fatalf("CLI %s failed: %v\n%s", args[0], err, output)

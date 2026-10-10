@@ -4,6 +4,7 @@ package main
 import (
 	"crypto/sha256"
 	"database/sql"
+	_ "embed"
 	"encoding/base64"
 	"encoding/json"
 	"errors"
@@ -82,11 +83,17 @@ setInterval(updateCountdown, 1000);
 setTimeout(refreshStatus, 3000);
 })();`
 
+// REQ-098: ship the App logo inside the binary; no third-party requests.
+//
+//go:embed device-logo.png
+var deviceLogoPNG []byte
+
 var devicePageTemplate = template.Must(template.New("device").Parse(`<!doctype html>
 <html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Sprout CLI 授权</title>
 <style>
 body{font:16px system-ui,sans-serif;margin:0}
+.brand{position:absolute;top:24px;left:24px;display:flex;align-items:center;gap:10px;height:48px;font-size:16px;line-height:24px;font-weight:600;letter-spacing:-.2px}.brand-logo{width:48px;height:48px;flex:none;overflow:hidden;border-radius:12px}.brand img{width:100%;height:100%;display:block;transform:scale(1.4)}
 .page{--background:oklch(0.2679 0.0036 106.6427);--text:oklch(0.8074 0.0142 93.0137);--muted:oklch(0.7713 0.0169 99.0657);--border:oklch(0.3618 0.0101 106.8928);--primary:oklch(0.6724 0.1308 38.7559);--input:oklch(0.4336 0.0113 100.2195);background:var(--background);color:var(--text);min-height:100vh;box-sizing:border-box;padding:80px 24px 48px;color-scheme:dark}
 main{max-width:440px;margin:auto}h1{font-size:24px}p{line-height:1.7;overflow-wrap:anywhere}.qr{width:288px;height:288px;max-width:100%;display:block;background:white}small{color:var(--muted)}
 #countdown{color:var(--primary);font-weight:600;font-variant-numeric:tabular-nums}
@@ -106,6 +113,7 @@ main{max-width:440px;margin:auto}h1{font-size:24px}p{line-height:1.7;overflow-wr
 </style>
 <input type="checkbox" id="day-mode" aria-label="白天模式">
 <div class="page"><label class="theme-toggle" for="day-mode" title="切换白天／黑夜模式"><span class="theme-track"><span class="theme-thumb"><svg class="moon-icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M20.9 13A9 9 0 0 1 11 3.1 9 9 0 1 0 20.9 13Z"/></svg><svg class="sun-icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="4"/><path d="M12 2v2m0 16v2M2 12h2m16 0h2M4.93 4.93l1.42 1.42m11.3 11.3 1.42 1.42M4.93 19.07l1.42-1.42m11.3-11.3 1.42-1.42"/></svg></span></span></label>
+<div class="brand" aria-label="Sprout"><span class="brand-logo"><img alt="" src="data:image/png;base64,{{.Logo}}"></span><span>Sprout</span></div>
 <main data-state="{{.Status}}"><h1>{{if .Result}}{{.Result}}{{else}}连接 Sprout CLI{{end}}</h1><p>Server：{{.Origin}}</p>
 {{if .QR}}<img class="qr" alt="CLI 授权申请二维码" src="data:image/png;base64,{{.QR}}">
 <p>核对码：{{.Code}}</p><p>权限：{{.Scope}}</p><p>剩余时间：<span id="countdown" data-deadline="{{.Expiry}}" data-remaining="{{.Remaining}}">{{.Countdown}}</span></p>
@@ -135,10 +143,10 @@ func (store *noteStore) registerDevicePage(mux *http.ServeMux) {
 			return
 		}
 		fields := struct {
-			Origin, QR, Scope, Countdown, Code, Status, Result, Explanation string
-			Remaining, Expiry                                               int64
-			Script                                                          template.JS
-		}{Origin: store.publicOrigin, Script: template.JS(deviceCountdownScript)}
+			Origin, QR, Scope, Countdown, Code, Status, Result, Explanation, Logo string
+			Remaining, Expiry                                                     int64
+			Script                                                                template.JS
+		}{Origin: store.publicOrigin, Logo: base64.StdEncoding.EncodeToString(deviceLogoPNG), Script: template.JS(deviceCountdownScript)}
 		if query != "" {
 			var status string
 			var expiry int64

@@ -1,13 +1,36 @@
 # Sprout
 
-手机快速记录，同步到自己的 Go Server。SQLite 保存笔记与图片。
+随手记录一句想法，保存到自己的 Server，再让 AI 在项目中按标签读取。Sprout App 负责快速记录和同步；Go Server 保存自己的数据；CLI 将笔记与附件同步成 AI 可读取的本地材料。
+
+支持文字、图片和文件附件、标签筛选、笔记编辑与回收站。保存后下拉同步；App 不内置 AI，也不把数据发送到第三方 AI 服务。
+
+## 快速开始
+
+1. 下载 Android App，按下方教程部署自己的 Server。
+2. 在 App 配置 Server URL 与 API Key，记录并下拉同步。
+3. 安装 CLI，在每个项目根目录分别扫码授权，按标签同步材料。
+
+```sh
+npm install --global @sprout-native/cli@0.6.0
+cd <你的项目根目录>
+sprout login --server https://app.example.com --workspace .
+sprout tags --server https://app.example.com --workspace .
+sprout init --server https://app.example.com --workspace . --tags work,reading --materials agent-materials
+sprout sync --workspace .
+```
+
+CLI 要求 Node.js 22.14+，支持 macOS/Linux。登录时打开终端提供的链接，在已连接同一 Server 的 App 中扫码，核对两边的“核对码”，再选择“拒绝”或“允许”。网页会显示授权与连接结果，默认深色，可切换浅色；CLI 不要求输入 App API Key。
+
+同一个 `sprout` 可用于多个项目；每个根目录需要单独登录，后续修改同步标签无需再次扫码。凭据保存在工作空间外的私有配置目录，旧版共享凭据不会自动导入。详细命令、Agent 工具接口及升级说明见 [CLI README](cli/README.md)。
 
 
 ## Android 安装包
 
-在 [Releases](https://github.com/wuqi2753/sprout-public/releases/latest) 下载 [sprout-1.5.0-android.apk](https://github.com/wuqi2753/sprout-public/releases/download/v1.5.0/sprout-1.5.0-android.apk)，支持 Android 7.0+、ARM64 / ARMv7 手机。正式版内置运行代码，不需要 localhost 或开发机；首次启动后填写自己的 Server 地址与 API Key。
+在 [Releases](https://github.com/wuqi2753/sprout-public/releases/latest) 下载 [sprout-1.5.1-android.apk](https://github.com/wuqi2753/sprout-public/releases/download/v1.5.1/sprout-1.5.1-android.apk)，支持 Android 7.0+、ARM64 / ARMv7 手机。正式版内置运行代码，不需要 localhost 或开发机；首次启动后填写自己的 Server 地址与 API Key。Release 同时提供 SHA-256 文件。
 
-正式版与原调试版签名不同，不能直接覆盖安装。已有调试版记录时先保留并备份数据，不要直接卸载；后续正式版可使用同一签名正常更新。
+同一正式签名的旧版可直接覆盖更新；开发包能否覆盖取决于其签名。遇到签名不一致时先备份，不要为安装新版而直接卸载丢失本地记录。
+
+1.5.1 修复长笔记分段删除时的文字抖动，授权确认使用“核对码”及“拒绝 / 允许”两个按钮。授权页 Logo 与文字比例调整属于 Server 更新；已有部署需更新并重建 Server 才能看到。
 
 ## 云服务器部署
 
@@ -90,7 +113,16 @@ openssl rand -hex 32
 nano .env
 ```
 
-`cp -i` 遇到已有 `.env` 会询问是否覆盖；已有配置时回答 `n`，跳过后续生成和编辑步骤。`openssl rand -hex 32` 只输出 64 位十六进制 API Key，不会自动写入文件；复制后，在 `nano` 打开的 `.env` 中填到 `SPROUT_API_KEY=` 后面。监听地址和数据库路径保留模板值设为 `SPROUT_LISTEN_ADDRESS=127.0.0.1:8080` 和 `SPROUT_DATABASE_PATH=/var/lib/sprout/sprout.db`。按 `Ctrl+O`、回车保存，再按 `Ctrl+X` 退出。
+`cp -i` 遇到已有 `.env` 会询问是否覆盖；已有配置时回答 `n`，跳过重新生成 Key。`openssl rand -hex 32` 只输出 API Key，不会自动写入文件；复制后，在 `nano` 打开的 `.env` 中填写以下配置，将示例域名替换为自己的 HTTPS 域名：
+
+```dotenv
+SPROUT_API_KEY=<生成的API Key>
+SPROUT_LISTEN_ADDRESS=127.0.0.1:8080
+SPROUT_DATABASE_PATH=/var/lib/sprout/sprout.db
+SPROUT_PUBLIC_ORIGIN=https://app.example.com
+```
+
+`SPROUT_PUBLIC_ORIGIN` 是 CLI 登录二维码与鉴权页使用的公开地址，不加路径或末尾斜线；未配置时 App API 仍可使用，CLI 授权返回 503。已有部署保留 Key、数据库路径，补充此字段并重启。按 `Ctrl+O`、回车保存，再按 `Ctrl+X` 退出。
 
 `chmod 600 .env` 表示只有文件所有者能读写，用来保护 API Key。`.env` 不提交 Git，`.env.example` 只保存示例。Server 和手机 App 使用同一个 API Key。
 
@@ -128,7 +160,7 @@ sudo systemctl enable --now sprout
 sudo systemctl is-active sprout
 ```
 
-应输出 `active`。字段说明见 [Server README](server/README.md#systemd-字段说明)。
+应输出 `active`。`User` 决定服务运行身份，`ExecStart` 指定程序和配置文件，`Restart` 控制异常重启，`UMask` 限制新建数据文件权限。
 
 **仍在云服务器的 Bash 终端**验证本机 API：
 
@@ -347,15 +379,32 @@ sed -n 's/^SPROUT_API_KEY=//p' .env
 
 | 路径 | 保存什么 |
 | --- | --- |
-| `/var/lib/sprout/sprout.db` | SQLite：笔记、图片原始字节、图片关联、同步操作记录 |
-| `$SPROUT_DIR/.env` | API Key、监听地址、数据库路径；不提交 Git |
+| `/var/lib/sprout/sprout.db` | SQLite：笔记、附件元信息与关系、同步及授权状态 |
+| `/var/lib/sprout/objects/` | 图片与文件原始字节；私有目录，不作为静态资源公开 |
+| `$SPROUT_DIR/.env` | API Key、监听地址、数据库路径、公开访问地址；不提交 Git |
 | `$SPROUT_DIR/sprout-server` | Go 程序，可重新构建 |
 | `$SPROUT_DIR` | Git 源码，不是生产数据目录 |
 
-**迁移数据要找数据库，不是复制 Git 项目。** 图片也在 SQLite 里，当前 Server 没有单独的图片文件目录。使用 SQLite `.backup` 导出完整备份；服务运行时不要只复制 `sprout.db`，同目录的 `-wal` 文件可能含有已提交数据。
+**迁移时同时保留数据库和同目录的 `objects/`，只复制 Git 项目或 SQLite 会丢失附件。** 先停止 Sprout，再用 SQLite `.backup` 导出数据库并复制 `objects/`；备份完成后重新启动。服务运行时不要直接复制 `sprout.db`，同目录的 `-wal` 文件可能含有已提交数据。
 
 迁到新服务器时，恢复数据库到配置路径并让运行 Server 的登录用户可读写；另外安全保存或重新配置 API Key，新入口单独配置 HTTPS。恢复后核对笔记和图片，再切换 DNS。
 
 修改 `.env` 后执行 `sudo systemctl restart sprout`；移动项目目录后更新 `ExecStart` 中的程序与配置路径，再执行 `daemon-reload` 和重启。
 
-更新、备份与排错见 [Server README](server/README.md)。
+## 更新已有部署
+
+在云服务器进入实际项目目录，保留 `.env`、数据库与 `objects/`，执行：
+
+```sh
+git pull --ff-only
+cd server
+go test ./...
+go build -o ../sprout-server.next .
+cd ..
+sudo systemctl stop sprout
+mv sprout-server.next sprout-server
+sudo systemctl start sprout
+sudo systemctl is-active sprout
+```
+
+首次启用 CLI 时补充 `SPROUT_PUBLIC_ORIGIN`，按前文验证 HTTPS 与 App 同步，再在每个项目根目录运行 CLI 登录。源码构建失败时先修复，不停止原服务。

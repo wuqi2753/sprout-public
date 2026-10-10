@@ -1,0 +1,60 @@
+// REQ-088: real Go handlers. Test-only mapping avoids DNS/certificate/deployment dependencies.
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import { spawn } from 'node:child_process';
+import { createServer } from 'node:net';
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { join, resolve } from 'node:path';
+import { WorkspaceStore } from '../dist/workspace.js';
+import { DatabaseSync } from 'node:sqlite';
+import { cliRoot, hash, waitFor } from './support.mjs';
+
+test('REQ-088 real Go Device Flow approval, CLI login, refresh and revoke', { skip: !process.env.SPROUT_TEST_SERVER_BINARY }, async (t) => {
+  const binary = resolve(process.env.SPROUT_TEST_SERVER_BINARY);
+  mkdirSync(join(cliRoot, '.tmp'), { recursive: true }); const root = mkdtempSync(join(cliRoot, '.tmp/go-oauth-'));
+  const credentials = join(root, 'credentials'); mkdirSync(credentials, { mode: 0o700 });
+  const workspace = join(root, 'workspace'); mkdirSync(workspace);
+  const workspaceId = new WorkspaceStore(workspace).identity();
+  const reserve = createServer(); await new Promise((resolve) => reserve.listen(0, '127.0.0.1', resolve)); const port = reserve.address().port; await new Promise((resolve) => reserve.close(resolve));
+  const endpoint = `http://127.0.0.1:${port}`; const origin = 'https://notes.example.com'; const key = 'oauth-integration-test-key';
+  const server = spawn(binary, [], { env: { ...process.env, SPROUT_LISTEN_ADDRESS: `127.0.0.1:${port}`, SPROUT_API_KEY: key, SPROUT_DATABASE_PATH: join(root, 'server.db'), SPROUT_PUBLIC_ORIGIN: origin }, stdio: ['ignore', 'pipe', 'pipe'] });
+  let logs = ''; server.stderr.on('data', (bytes) => { logs += bytes; }); const exited = new Promise((resolve) => server.once('exit', resolve));
+  const processes = [];
+  t.after(async () => { for (const running of processes) if (running.exitCode === null) running.kill('SIGKILL'); if (server.exitCode === null) server.kill('SIGTERM'); await exited; rmSync(root, { recursive: true, force: true }); });
+  await waitFor(() => logs.includes('listening'), 10000);
+  const preload = join(root, 'transport.mjs');
+  writeFileSync(preload, `const original=globalThis.fetch;globalThis.fetch=(input,options)=>{const url=new URL(input);if(url.origin===process.env.SPROUT_TEST_ORIGIN)return original(process.env.SPROUT_TEST_ENDPOINT+url.pathname+url.search,options);throw new Error('Unexpected test origin')};`);
+  const run = (args) => {
+    if (!args.includes('--workspace')) args = [...args, '--workspace', workspace];
+    const running = spawn(process.execPath, ['--import', preload, join(cliRoot, 'dist/main.js'), ...args], { env: { ...process.env, SPROUT_CLI_CONFIG_DIR: credentials, SPROUT_TEST_ORIGIN: origin, SPROUT_TEST_ENDPOINT: endpoint }, stdio: ['ignore', 'pipe', 'pipe'] });
+    processes.push(running); const result = { stdout: '', stderr: '' }; running.stdout.on('data', (bytes) => { result.stdout += bytes; }); running.stderr.on('data', (bytes) => { result.stderr += bytes; });
+    result.done = new Promise((resolve) => running.once('exit', (code) => { result.code = code; resolve(result); })); return result;
+  };
+  const login = run(['login', '--server', origin, '--json']); await waitFor(() => login.stderr.includes('authorization_required'));
+  const event = JSON.parse(login.stderr.split('\n').find((line) => line.startsWith('{')));
+  const approval = await fetch(endpoint + '/oauth/device_requests/' + event.user_code + '/decision', { method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'approve' }) }); assert.equal(approval.status, 200);
+  const logged = await login.done; assert.equal(logged.code, 0, logged.stderr); assert.equal(JSON.parse(logged.stdout).data.authenticated, true);
+  const other = join(root, 'other'); mkdirSync(other);
+  const unauthorized = await run(['tags', '--server', origin, '--workspace', other, '--json']).done;
+  assert.equal(unauthorized.code, 1); assert.equal(JSON.parse(unauthorized.stdout).error.code, 'AUTH_REQUIRED');
+  const otherLogin = run(['login', '--server', origin, '--workspace', other, '--json']);
+  await waitFor(() => otherLogin.stderr.includes('authorization_required'));
+  const otherEvent = JSON.parse(otherLogin.stderr.split('\n').find(line => line.startsWith('{')));
+  assert.notEqual(otherEvent.user_code, event.user_code);
+  const otherApproval = await fetch(endpoint + '/oauth/device_requests/' + otherEvent.user_code + '/decision', { method: 'POST', headers: { Authorization: 'Bearer ' + key, 'Content-Type': 'application/json' }, body: JSON.stringify({ decision: 'approve' }) });
+  assert.equal(otherApproval.status, 200); assert.equal((await otherLogin.done).code, 0);
+  const otherFile = join(credentials, 'workspaces', new WorkspaceStore(other).identity(), hash(origin) + '.json');
+  const otherCredentials = readFileSync(otherFile, 'utf8');
+  const file = join(credentials, 'workspaces', workspaceId, hash(origin) + '.json'); const first = JSON.parse(readFileSync(file));
+  assert.notEqual(first.refresh_token, JSON.parse(otherCredentials).refresh_token);
+  writeFileSync(file, JSON.stringify({ ...first, expires_at: 1 }), { mode: 0o600 });
+  const tags = await run(['tags', '--server', origin, '--json']).done; assert.equal(tags.code, 0, tags.stderr);
+  const rotated = JSON.parse(readFileSync(file)); assert.notEqual(rotated.refresh_token, first.refresh_token); assert.notEqual(rotated.access_token, first.access_token); assert.equal(rotated.uncertain, false);
+  const logout = await run(['logout', '--server', origin, '--json']).done; assert.equal(logout.code, 0, logout.stderr); assert.equal(existsSync(file), false);
+  assert.equal(readFileSync(otherFile, 'utf8'), otherCredentials);
+  assert.equal((await run(['tags', '--server', origin, '--workspace', other, '--json']).done).code, 0);
+  assert.equal((await run(['logout', '--server', origin, '--workspace', other, '--json']).done).code, 0);
+  const database = new DatabaseSync(join(root, 'server.db'), { readOnly: true });
+  try { assert.equal(database.prepare('SELECT count(*) AS count FROM oauth_grants WHERE revoked=1').get().count, 2); assert.equal(database.prepare('SELECT count(*) AS count FROM oauth_tokens WHERE active=1 AND kind=?').get('refresh_token').count, 2); } finally { database.close(); }
+  assert.doesNotMatch(logged.stdout + logged.stderr + logout.stdout, new RegExp(first.refresh_token));
+});

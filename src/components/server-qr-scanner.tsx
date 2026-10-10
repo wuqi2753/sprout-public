@@ -7,7 +7,7 @@ import { useCallback, useEffect, useRef, useState } from 'react';
 import { AppState, Linking, Modal, Pressable, ScrollView, StyleSheet, View } from 'react-native';
 import { SafeAreaView } from 'react-native-safe-area-context';
 import { parseServerQr, validateQrConnection, type ServerQr } from '@/api/server-qr';
-import { requestCliApproval, cliPermissionLabels, cliRequestStatusMessage, type CliDeviceRequest } from '@/api/cli-device-approval';
+import { requestCliApproval, cliRequestStatusMessage, type CliDeviceRequest } from '@/api/cli-device-approval';
 import { getServerConnectionConfig } from '@/storage/server-connection';
 import type { ServerConnectionConfig } from '@/api/server-connection';
 import { ThemedText } from '@/components/themed-text';
@@ -36,6 +36,7 @@ export function ServerQrScanner({ onClose, serverUrl, connected = false, allowPa
   }, []);
   // REQ-096: only an explicit user decision may approve a verified request.
   const [cliRequest, setCliRequest] = useState<CliDeviceRequest>();
+  const cliDecisionVisible = qr?.type === 'cli' && cliRequest?.status === 'pending' && !message;
   const approvalConnection = useRef<ServerConnectionConfig | undefined>(undefined);
   const approvalController = useRef<AbortController | undefined>(undefined);
   const liveServer = useRef({ serverUrl, connected });
@@ -171,14 +172,14 @@ export function ServerQrScanner({ onClose, serverUrl, connected = false, allowPa
       </View>}
       {(qr || message) && <View style={styles.overlay}><View accessibilityViewIsModal style={[styles.card, { backgroundColor: theme.surface }]}><ScrollView style={{ flexGrow: 0, flexShrink: 1 }}>
         <ThemedText accessibilityRole="header" style={styles.title}>{message ? '扫码提示' : qr?.type === 'pairing' ? '连接此 Server？' : '允许 CLI 连接？'}</ThemedText>
-        <ThemedText style={styles.details}>{message ?? (qr?.type === 'pairing' ? `${serverUrl ? '将更换当前连接。\n' : ''}${qr.serverUrl}\n请确认这是你自己的 Server。` : `${new URL(qr!.serverUrl).host}\n${cliRequest ? `${cliRequest.clientId}\n核对码：${cliRequest.userCode}\n请与 CLI 页面核对。\n${cliRequest.scope.map((scope) => cliPermissionLabels[scope]).join('\n')}\n有效至：${new Date(cliRequest.expiresAt).toLocaleTimeString()}` : '正在查询申请权限…'}`)}</ThemedText>
+        <ThemedText style={styles.details}>{message ?? (qr?.type === 'pairing' ? `${serverUrl ? '将更换当前连接。\n' : ''}${qr.serverUrl}\n请确认这是你自己的 Server。` : cliRequest ? `核对码：${cliRequest.userCode}` : '正在查询申请…')}</ThemedText>
         </ScrollView>
         <View style={styles.actions}>
-          <ScanButton label="关闭" onPress={onClose} disabled={connecting} />
-          {message && qr?.type === 'cli' && <ScanButton label={connecting ? '查询中…' : '重新查询'} onPress={() => { void queryOrDecide(qr); }} disabled={connecting} />}
-          {message && <ScanButton label="重新扫描" onPress={rescan} disabled={connecting} primary />}
-          {message && onManualEntry && <ScanButton label="手动填写" onPress={onManualEntry} disabled={connecting} />}
-          {qr?.type === 'cli' && cliRequest?.status === 'pending' && !message && <>
+          {!cliDecisionVisible && <ScanButton label="关闭" onPress={onClose} disabled={connecting} />}
+          {message && qr?.type === 'cli' && cliRequest?.status !== 'approved' && cliRequest?.status !== 'consumed' && <ScanButton label={connecting ? '查询中…' : '重新查询'} onPress={() => { void queryOrDecide(qr); }} disabled={connecting} />}
+          {message && cliRequest?.status !== 'approved' && cliRequest?.status !== 'consumed' && <ScanButton label="重新扫描" onPress={rescan} disabled={connecting} primary />}
+          {message && onManualEntry && cliRequest?.status !== 'approved' && cliRequest?.status !== 'consumed' && <ScanButton label="手动填写" onPress={onManualEntry} disabled={connecting} />}
+          {cliDecisionVisible && qr?.type === 'cli' && <>
             <ScanButton label="拒绝" onPress={() => { void queryOrDecide(qr, 'deny'); }} disabled={connecting} />
             <ScanButton label={connecting ? '处理中…' : '允许'} onPress={() => { void queryOrDecide(qr, 'approve'); }} disabled={connecting} primary />
           </>}

@@ -1,9 +1,12 @@
 // REQ-044: Real session logic and SDK boundary, including asynchronous stale results.
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
+import { createRequire } from 'node:module';
 import test from 'node:test';
 import vm from 'node:vm';
 import ts from 'typescript';
+
+const require = createRequire(import.meta.url);
 
 function load(filename, modules) {
   const source = readFileSync(new URL(`../../${filename}`, import.meta.url), 'utf8');
@@ -176,7 +179,7 @@ test('Web explicitly denies native biometric access', async () => {
 });
 
 function renderEditor(memo, session, draftContent = memo.content, options = {}) {
-  const states = [memo, draftContent, options.createdOn ?? memo.createdOn, options.timePickerOpen ?? false, false, memo.imageUris ?? [], memo.fileAttachments ?? [], false, options.selection ?? { start: 0, end: 0 }, 52, true, 400, 60, options.menuOpen ?? false, options.historyTags ?? [], 0, 0, options.feedback];
+  const states = [memo, draftContent, options.createdOn ?? memo.createdOn, options.timePickerOpen ?? false, false, memo.imageUris ?? [], memo.fileAttachments ?? [], false, options.selection ?? { start: 0, end: 0 }, 52, true, 400, options.menuOpen ?? false, options.historyTags ?? [], 0, 0, options.feedback];
   let stateIndex = 0;
   const effects = [];
   const edits = [];
@@ -184,16 +187,29 @@ function renderEditor(memo, session, draftContent = memo.content, options = {}) 
   const copies = [], deletions = [], alerts = [];
   const memoFunctions = load('src/memos.ts', {});
   const jsx = (type, props) => ({ type, props });
+  // Exercise the installed tag parser and Text tree, including its unstyled root Text.
+  const mentions = load('node_modules/react-native-controlled-mentions/dist/hooks/use-mentions.js', {
+    '../utils': require('react-native-controlled-mentions/dist/utils/index.js'),
+    react: {
+      createElement: (type, props, ...children) => jsx(type, { ...props, children: children.length === 1 ? children[0] : children }),
+      useState: (initialValue) => [initialValue, () => {}],
+      useMemo: (factory) => factory(),
+    },
+    'react-native': { Text: 'Text' },
+  });
   const screen = load('app/memo/[id].tsx', {
     'react/jsx-runtime': { jsx, jsxs: jsx },
     react: {
+      cloneElement: (element, props) => ({ ...element, props: { ...element.props, ...props } }),
       useState: (initialValue) => { const index = stateIndex++; return [index < states.length ? states[index] : initialValue, (value) => stateChanges.push([index, value])]; },
       useEffect: (effect) => effects.push(effect),
+      useMemo: (factory) => factory(),
       useRef: (value) => ({ current: value }),
     },
     'expo-symbols': { SymbolView: 'Symbol' },
     'expo-router': { Stack: { Screen: 'StackScreen' }, useNavigation: () => ({ isFocused: () => true, addListener: () => () => {} }), useLocalSearchParams: () => ({ id: memo.id }), useRouter: () => ({ back() {}, replace() {} }) },
     'expo-image': { Image: 'Image' },
+    'react-native-controlled-mentions': mentions,
     'expo-clipboard': { setStringAsync: async (text) => copies.push(text) },
     '@/memos': memoFunctions,
     'expo-image-picker': {},
@@ -208,7 +224,7 @@ function renderEditor(memo, session, draftContent = memo.content, options = {}) 
     '@/components/haptic-pressable': { Pressable: 'Button' },
     '@/components/themed-text': { ThemedText: 'Text' },
     '@/constants/theme': { Spacing: { three: 12 } },
-    '@/hooks/use-theme': { useTheme: () => ({}) },
+    '@/hooks/use-theme': { useTheme: () => options.theme ?? ({ text: '#222222', memoTag: '#AA4824' }) },
     '@/storage/memos': { getMemo: async () => memo, getMemos: async () => [], deleteMemo: async (id) => deletions.push(id), updateMemoDraft: async (...parameters) => edits.push(parameters) },
     '@/auth/hidden-memo-session': { hiddenMemoSession: session },
     '@/hooks/use-hidden-memo-access': { useHiddenMemoAccess: session.getSnapshot },
@@ -227,6 +243,38 @@ function renderEditor(memo, session, draftContent = memo.content, options = {}) 
 }
 
 const hiddenMemo = { id: 'private', hidden: true, content: 'hidden draft', imageUris: [], tags: [], createdOn: new Date(), savedAt: new Date(), fileAttachments: [{ uri: 'private-uri', name: 'private.pdf' }] };
+
+test('REQ-047 multiline deletion keeps native and highlighted text metrics equal without controlled height', () => {
+  const session = createSession(async () => ({ success: true }));
+  const content = '#motto First paragraph\nFirst paragraph line two\n\nSecond paragraph abcdef\nSecond paragraph line two\n\nThird paragraph\nFinal line';
+  const memo = { ...hiddenMemo, hidden: false, content };
+  for (const theme of [{ text: '#222222', memoTag: '#AA4824' }, { text: '#EEEEEE', memoTag: '#F29D72' }]) {
+    for (const draft of [content, content.replace('abcdef', 'abcde'), content.replace('abcdef', ''), '', '#重新输入\n正文']) {
+      const screen = renderEditor(memo, session, draft, { theme });
+      const input = screen.nodes.find((node) => node.type === 'Input');
+      const inputStyle = Object.assign({}, ...input.props.style);
+      const spanStyle = Object.assign({}, ...input.props.children.props.style);
+      for (const metric of ['fontSize', 'lineHeight', 'fontWeight', 'includeFontPadding']) {
+        assert.equal(inputStyle[metric], spanStyle[metric], metric);
+      }
+      assert.equal(inputStyle.height, undefined, 'contentSize must not control native height');
+      assert.equal(input.props.value, undefined, 'styled children must be the only text source');
+      const parts = input.props.children.props.children;
+      assert.equal(parts.map((part) => part.props.children).join(''), draft);
+      for (const part of parts.filter((part) => part.props.style)) {
+        assert.equal(part.props.style.color, theme.memoTag);
+        assert.equal(part.props.style.fontSize, undefined);
+        assert.equal(part.props.style.fontWeight, undefined);
+      }
+      const edited = draft.replace('abcde', 'abcd');
+      input.props.onChangeText(edited);
+      assert.ok(screen.stateChanges.some(([index, value]) => index === 1 && value === edited));
+      input.props.onContentSizeChange({ nativeEvent: { contentSize: { height: 208 } } });
+      assert.ok(screen.stateChanges.some(([index, value]) => index === 9 && value === 208));
+      assert.ok(screen.nodes.findIndex((node) => node.props?.accessibilityLabel === '移除文件 private.pdf') > screen.nodes.indexOf(input));
+    }
+  }
+});
 
 test('direct hidden editor route renders no draft, attachment, timestamp or save control while locked', () => {
   const session = createSession(async () => ({ success: true }));

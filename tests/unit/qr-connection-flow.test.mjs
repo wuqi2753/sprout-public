@@ -223,6 +223,55 @@ test('REQ-096 uncertain approval requires query, expired and changed connections
 });
 
 const replacementCallbacks = connectionCallbacks('server-connection-form.tsx', ['requestConnection', 'confirmReplacement']);
+
+// REQ-096: render the real confirmation branch, including pending submission and terminal feedback.
+function renderApprovalDialog(status, connecting = false) {
+  const qr = { type: 'cli', serverUrl: 'https://notes.example.com', userCode: 'ABCD-1234' };
+  const message = status === 'pending' ? undefined : status === 'approved' ? '已授权' : '申请已过期';
+  const states = [true, true, qr, message, connecting, { status, userCode: qr.userCode }];
+  let stateIndex = 0;
+  const jsx = (type, props) => ({ type, props });
+  const modules = {
+    'react/jsx-runtime': { jsx, jsxs: jsx, Fragment: 'Fragment' },
+    react: { useState: () => [states[stateIndex++], () => {}], useRef: (value) => ({ current: value }), useEffect() {}, useCallback: (callback) => callback },
+    'expo-router': { useFocusEffect() {} },
+    'expo-camera': { CameraView: 'Camera', useCameraPermissions: () => [{ granted: true }, () => {}] },
+    'expo-symbols': { SymbolView: 'Symbol' },
+    'react-native-svg': { default: 'Svg', Path: 'Path' },
+    'react-native': { AppState: { currentState: 'active' }, Linking: {}, Modal: 'Modal', Pressable: 'Pressable', ScrollView: 'Scroll', View: 'View', StyleSheet: { create: (styles) => styles } },
+    'react-native-safe-area-context': { SafeAreaView: 'SafeArea' },
+    '@/api/server-qr': {}, '@/api/cli-device-approval': {}, '@/storage/server-connection': {},
+    '@/components/themed-text': { ThemedText: 'Text' }, '@/hooks/use-theme': { useTheme: () => ({}) },
+  };
+  const source = readFileSync(new URL('../../src/components/server-qr-scanner.tsx', import.meta.url), 'utf8');
+  const compiled = ts.transpileModule(source, { compilerOptions: { module: ts.ModuleKind.CommonJS, jsx: ts.JsxEmit.ReactJSX } }).outputText;
+  const exports = {};
+  vm.runInNewContext(`(function(require, exports) { ${compiled} })`)((name) => {
+    assert.ok(name in modules, name); return modules[name];
+  }, exports);
+  const nodes = [];
+  function collect(node) {
+    if (Array.isArray(node)) { node.forEach(collect); return; }
+    if (!node || typeof node !== 'object') return;
+    nodes.push(node); collect(node.props?.children);
+  }
+  collect(exports.ServerQrScanner({ onClose() {}, connected: true, serverUrl: qr.serverUrl }));
+  return nodes;
+}
+
+test('REQ-096 pending confirmation shows verification code and exactly deny/allow, including submission', () => {
+  for (const connecting of [false, true]) {
+    const nodes = renderApprovalDialog('pending', connecting);
+    const buttons = nodes.filter((node) => node.props?.label);
+    assert.deepEqual(buttons.map((node) => node.props.label), ['拒绝', connecting ? '处理中…' : '允许']);
+    assert.ok(buttons.every((node) => node.props.disabled === connecting));
+    assert.ok(nodes.some((node) => node.props?.children === '核对码：ABCD-1234'));
+    assert.ok(!nodes.some((node) => typeof node.props?.children === 'string' && node.props.children.includes('核销码')));
+  }
+  assert.deepEqual(renderApprovalDialog('approved').filter((node) => node.props?.label).map((node) => node.props.label), ['关闭']);
+  assert.ok(renderApprovalDialog('expired').some((node) => node.props?.label === '重新查询'));
+});
+
 test('replacement requires confirmation and passes only new credentials', async () => {
   let pending; const calls = [];
   const context = vm.createContext({ Error, connectionPending: { current: false }, connecting: false, saving: false, savedConnection: { current: { serverApiUrl: 'https://old.example.com', apiKey: 'old-key' } }, serverApiUrl: incoming.serverApiUrl, apiKey: incoming.apiKey, setReplacement: (config) => { pending = config; context.replacement = config; }, saveConnection: async (config) => calls.push({ ...config }), showError: () => assert.fail('unexpected error') });
