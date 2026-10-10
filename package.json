@@ -1,7 +1,7 @@
 {
   "name": "sprout",
   "main": "expo-router/entry",
-  "version": "1.4.3",
+  "version": "1.4.4",
   "dependencies": {
     "@expo-google-fonts/caveat": "^0.4.2",
     "@expo/ui": "~57.0.19",

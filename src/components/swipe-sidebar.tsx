@@ -1,8 +1,8 @@
-// REQ-013: continuous sidebar dragging and velocity-aware settling.
-import { useEffect, useState, type ReactNode } from 'react';
-import { BackHandler, Keyboard, Pressable, StyleSheet, View } from 'react-native';
+// REQ-013 / REQ-095: continuous dragging and recovery after background interruption.
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
+import { AppState, BackHandler, Keyboard, Pressable, StyleSheet, View } from 'react-native';
 import { Gesture, GestureDetector } from 'react-native-gesture-handler';
-import Reanimated, { cancelAnimation, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
+import Reanimated, { cancelAnimation, runOnUI, useAnimatedStyle, useSharedValue, withSpring } from 'react-native-reanimated';
 import { scheduleOnRN } from 'react-native-worklets';
 
 const spring = { damping: 30, stiffness: 280, mass: 1, overshootClamping: true };
@@ -21,23 +21,50 @@ export function SwipeSidebar({ children, sidebar, open, width, gesturesEnabled, 
   const startX = useSharedValue(0);
   const ended = useSharedValue(false);
   const dragging = useSharedValue(false);
-  const targetOpen = useSharedValue(open);
-  const targetWidth = useSharedValue(width);
+  const confirmed = useRef({ open, width });
+  const target = useRef({ open, width });
+  useLayoutEffect(() => { confirmed.current = { open, width }; }, [open, width]);
+  const active = useSharedValue(AppState.currentState === 'active');
+  const [foreground, setForeground] = useState(AppState.currentState === 'active');
   const [visible, setVisible] = useState(open);
 
-  function hideSidebar() { setVisible(false); }
-  function beginDrag() { setVisible(true); Keyboard.dismiss(); }
-  function commitOpen(nextOpen: boolean) { onOpenChange(nextOpen); }
+  function hideSidebar() { if (!confirmed.current.open) setVisible(false); }
+  function beginDrag() { if (AppState.currentState !== 'active') return; setVisible(true); Keyboard.dismiss(); }
+  function commitOpen(nextOpen: boolean) {
+    if (AppState.currentState !== 'active') return;
+    target.current = { open: nextOpen, width: confirmed.current.width };
+    onOpenChange(nextOpen);
+  }
 
   useEffect(() => {
-    if (targetOpen.get() === open && targetWidth.get() === width) return;
-    targetOpen.set(open);
-    targetWidth.set(width);
+    const subscription = AppState.addEventListener('change', (state) => {
+      const nextForeground = state === 'active';
+      setForeground(nextForeground);
+      const { open: confirmedOpen, width: confirmedWidth } = confirmed.current;
+      // No synchronous SharedValue reads on RN while the UI runtime is suspended.
+      runOnUI(() => {
+        'worklet';
+        active.set(nextForeground);
+        cancelAnimation(offset);
+        ended.set(true);
+        dragging.set(false);
+        startOffset.set(0);
+        startX.set(0);
+        offset.set(confirmedOpen ? confirmedWidth : 0);
+      })();
+      setVisible(confirmedOpen);
+    });
+    return () => subscription.remove();
+  }, [active, dragging, ended, offset, startOffset, startX]);
+
+  useEffect(() => {
+    if (target.current.open === open && target.current.width === width) return;
+    target.current = { open, width };
     if (open) { scheduleOnRN(beginDrag); }
     offset.set(withSpring(open ? width : 0, spring, (finished) => {
       if (finished && !open) scheduleOnRN(hideSidebar);
     }));
-  }, [open, width, offset, targetOpen, targetWidth]);
+  }, [open, width, offset]);
 
   useEffect(() => {
     if (!visible) return;
@@ -51,23 +78,29 @@ export function SwipeSidebar({ children, sidebar, open, width, gesturesEnabled, 
     return () => subscription.remove();
   }, [visible, onOpenChange, offset]);
 
+  // Gesture callbacks run on interaction, not during render; their RN callbacks
+  // consult the latest committed props only when scheduled by the UI runtime.
+  /* eslint-disable react-hooks/refs */
   const pan = Gesture.Pan()
-    .enabled(gesturesEnabled)
+    .enabled(gesturesEnabled && foreground)
     .activeOffsetX(open || visible ? [-10, 10] : 10)
     .failOffsetY([-12, 12])
-    .onBegin((event) => { startX.value = event.absoluteX; ended.value = false; dragging.value = false; })
+    .onBegin((event) => { startX.set(event.absoluteX); ended.set(false); dragging.set(false); })
     .onStart(() => {
-      dragging.value = true;
+      if (!active.value) return;
+      dragging.set(true);
       cancelAnimation(offset);
-      startOffset.value = offset.value;
+      startOffset.set(offset.value);
       if (startX.value > 32 || startOffset.value > 0) scheduleOnRN(beginDrag);
     })
     .onUpdate((event) => {
+      if (!active.value) return;
       if (startX.value <= 32 && startOffset.value === 0) return;
       offset.set(Math.max(0, Math.min(width, startOffset.value + event.translationX)));
     })
     .onEnd((event) => {
-      ended.value = true;
+      if (!active.value) return;
+      ended.set(true);
       if (startX.value <= 32 && startOffset.value === 0) {
         if (event.translationX >= 64) scheduleOnRN(onEdgeBack);
         return;
@@ -75,18 +108,18 @@ export function SwipeSidebar({ children, sidebar, open, width, gesturesEnabled, 
       const nextOpen = Math.abs(event.velocityX) > 500
         ? event.velocityX > 0
         : offset.value + event.velocityX * 0.15 > width / 2;
-      targetOpen.set(nextOpen);
       offset.set(withSpring(nextOpen ? width : 0, { ...spring, velocity: event.velocityX }, (finished) => {
         if (finished && !nextOpen) scheduleOnRN(hideSidebar);
       }));
       scheduleOnRN(commitOpen, nextOpen);
     })
     .onFinalize(() => {
-      if (ended.value || !dragging.value) return;
+      if (!active.value || ended.value || !dragging.value) return;
       offset.set(withSpring(open ? width : 0, spring, (finished) => {
         if (finished && !open) scheduleOnRN(hideSidebar);
       }));
     });
+  /* eslint-enable react-hooks/refs */
   const sidebarStyle = useAnimatedStyle(() => ({ transform: [{ translateX: offset.value - width }] }));
   const backdropStyle = useAnimatedStyle(() => ({ opacity: offset.value / width }));
 
