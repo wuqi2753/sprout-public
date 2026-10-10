@@ -3,12 +3,15 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import vm from 'node:vm';
 import test from 'node:test';
+import ts from 'typescript';
 
 const home = readFileSync(new URL('../../app/index.tsx', import.meta.url), 'utf8');
 const form = readFileSync(new URL('../../src/components/server-connection-form.tsx', import.meta.url), 'utf8');
 const start = home.indexOf('  useFocusEffect(', home.indexOf('function HomeScreen()'));
 const focus = home.slice(start, home.indexOf('  useFocusEffect(', start + 1));
-const save = form.slice(form.indexOf('  async function saveConnection()'), form.indexOf('\n  return (', form.indexOf('  async function saveConnection()')));
+const saveStart = form.indexOf('  async function saveConnection(');
+const save = ts.transpileModule(form.slice(saveStart, form.indexOf('\n  return (', saveStart)), { compilerOptions: { target: ts.ScriptTarget.ES2022 } }).outputText;
+
 
 test('REQ-039 configured home initializes before loading real memos', async () => {
   const calls = [];
@@ -43,6 +46,7 @@ test('REQ-039 initialization failure is visible and prevents a false empty resul
 test('REQ-039 successful connection saves and initializes before entering home', async () => {
   const calls = [];
   await vm.runInNewContext(`${save}\nsaveConnection()`, {
+    connectionPending: { current: false }, connecting: false, connectionSession: { current: 1 },
     setSaving: () => {}, verifyConnection: async () => ({ serverApiUrl: 'https://memo.example.com', apiKey: 'fixture-key' }),
     saveServerConnectionConfig: async () => calls.push('save'),
     initializeWelcomeMemo: async () => calls.push('initialize'),
@@ -54,6 +58,7 @@ test('REQ-039 successful connection saves and initializes before entering home',
 
 test('REQ-039 failed verification does not save, initialize or enter home', async () => {
   await vm.runInNewContext(`${save}\nsaveConnection()`, {
+    connectionPending: { current: false }, connecting: false, connectionSession: { current: 1 },
     setSaving: () => {}, verifyConnection: async () => undefined,
     saveServerConnectionConfig: async () => assert.fail('unexpected save'),
     initializeWelcomeMemo: async () => assert.fail('unexpected initialization'),
@@ -65,6 +70,7 @@ test('REQ-039 failed verification does not save, initialize or enter home', asyn
 test('REQ-039 welcome failure after save keeps the form open for retry', async () => {
   let failure;
   await vm.runInNewContext(`${save}\nsaveConnection()`, {
+    connectionPending: { current: false }, connecting: false, connectionSession: { current: 1 },
     setSaving: () => {}, verifyConnection: async () => ({ serverApiUrl: 'https://memo.example.com', apiKey: 'fixture-key' }),
     saveServerConnectionConfig: async () => {},
     initializeWelcomeMemo: async () => { throw new Error('fixture failure'); },

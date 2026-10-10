@@ -39,7 +39,7 @@ var noteIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}$`)
 // REQ-048: revisions preserve immutable bytes when editor attachments change.
 var imageIDPattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9_-]{0,127}(:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12})?:[0-8]$`)
 
-type serverConfig struct{ listenAddress, apiKey, databasePath string }
+type serverConfig struct{ listenAddress, apiKey, databasePath, publicOrigin string }
 type jsonResponse struct {
 	Status string `json:"status,omitempty"`
 	Error  string `json:"error,omitempty"`
@@ -102,6 +102,7 @@ type noteStore struct {
 	database         *sql.DB
 	now              func() time.Time
 	objectsDirectory string
+	publicOrigin     string
 }
 
 func loadConfig(getenv func(string) string) (serverConfig, error) {
@@ -120,7 +121,15 @@ func loadConfig(getenv func(string) string) (serverConfig, error) {
 	if databasePath == "" {
 		databasePath = defaultDatabasePath
 	}
-	return serverConfig{listenAddress, apiKey, databasePath}, nil
+	publicOrigin := strings.TrimSpace(getenv("SPROUT_PUBLIC_ORIGIN"))
+	if publicOrigin != "" {
+		origin, err := normalizeConnectionQRURL(publicOrigin)
+		if err != nil {
+			return serverConfig{}, errors.New("SPROUT_PUBLIC_ORIGIN must be a valid HTTPS domain origin")
+		}
+		publicOrigin = origin
+	}
+	return serverConfig{listenAddress, apiKey, databasePath, publicOrigin}, nil
 }
 
 // REQ-038: Initialize schema without seeding or replacing any user data.
@@ -159,6 +168,9 @@ func openNoteStore(databasePath string) (store *noteStore, initializationError e
 		CREATE INDEX IF NOT EXISTS processed_operations_note_id_index ON processed_operations(note_id);`); err != nil {
 		return nil, fmt.Errorf("initialize SQLite database: %w", err)
 	}
+	if _, err = transaction.Exec(workspaceSyncSchema); err != nil {
+		return nil, fmt.Errorf("initialize workspace sync schema: %w", err)
+	}
 	if err = transaction.Commit(); err != nil {
 		return nil, fmt.Errorf("commit SQLite schema initialization: %w", err)
 	}
@@ -167,6 +179,15 @@ func openNoteStore(databasePath string) (store *noteStore, initializationError e
 		return nil, err
 	}
 	if err := store.initializeTrash(); err != nil {
+		return nil, err
+	}
+	if err := store.initializeDeviceRequests(); err != nil {
+		return nil, err
+	}
+	if err := store.initializeOAuth(); err != nil {
+		return nil, err
+	}
+	if err := store.initializeBusinessSync(); err != nil {
 		return nil, err
 	}
 	return store, nil
@@ -262,8 +283,7 @@ func newHandler(apiKey string, store *noteStore) http.Handler {
 		handleGetOperation(w, r, store, id)
 	})
 	mux.HandleFunc(objectsPath, func(w http.ResponseWriter, r *http.Request) {
-		if !authenticate(r, apiKey) {
-			writeAPIError(w, 401, "invalid_api_key", "API key is missing or invalid")
+		if !store.authenticateAttachment(w, r, apiKey, "note_images", "image_id", strings.TrimPrefix(r.URL.Path, objectsPath)) {
 			return
 		}
 		id := strings.TrimPrefix(r.URL.Path, objectsPath)
@@ -282,6 +302,10 @@ func newHandler(apiKey string, store *noteStore) http.Handler {
 		}
 	})
 	store.registerFileRoutes(mux, apiKey)
+	store.registerDeviceRequestRoutes(mux, apiKey)
+	store.registerOAuthRoutes(mux)
+	store.registerSubscriptionRoutes(mux)
+	store.registerDevicePage(mux)
 	return mux
 }
 
@@ -619,12 +643,30 @@ func (store *noteStore) applyMutation(ctx context.Context, op, id, kind, fingerp
 		return 0, nil, err
 	}
 	stamp := store.now().UTC().Format(time.RFC3339Nano)
+	var before noteChangeState
+	if kind != "purge" && kind != "clear" {
+		before, err = readNoteChangeState(ctx, tx, id)
+		if err != nil {
+			return 0, nil, err
+		}
+	}
 	code, body, version, err := mutate(tx, stamp)
 	if err != nil {
 		return 0, nil, err
 	}
 	if code >= 400 {
 		return code, body, nil
+	}
+	if kind != "purge" && kind != "clear" {
+		after, readErr := readNoteChangeState(ctx, tx, id)
+		if readErr != nil {
+			return 0, nil, readErr
+		}
+		if after.version != before.version {
+			if err := appendNoteChange(ctx, tx, id, before, after, stamp); err != nil {
+				return 0, nil, err
+			}
+		}
 	}
 	if _, err = tx.ExecContext(ctx, `INSERT INTO processed_operations(operation_id,note_id,operation,request_fingerprint,response_code,response_body,result_version,applied_at) VALUES(?,?,?,?,?,?,?,?)`, op, id, kind, fingerprint, code, body, version, stamp); err != nil {
 		return 0, nil, err
@@ -808,15 +850,31 @@ func writeRawJSON(w http.ResponseWriter, code int, body []byte) {
 
 func run() error {
 	configPath := flag.String("env-file", ".env", "Server configuration file path (REQ-032)")
+	connectionAddress := flag.String("connection-qr", "", "Generate a connection QR for this HTTPS Server URL and exit (REQ-073)")
+	qrOutput := flag.String("qr-output", "", "Save the connection QR as a private PNG instead of displaying it")
 	flag.Parse()
 	explicitPath := false
+	qrRequested := false
 	flag.Visit(func(argument *flag.Flag) {
 		if argument.Name == "env-file" {
 			explicitPath = true
 		}
+		if argument.Name == "connection-qr" {
+			qrRequested = true
+		}
 	})
 	if flag.NArg() != 0 {
 		return errors.New("unexpected Server arguments; use -env-file to specify configuration")
+	}
+	if qrRequested {
+		config, err := loadConfigFile(*configPath, true, func(string) (string, bool) { return "", false })
+		if err != nil {
+			return err
+		}
+		return generateConnectionQR(*connectionAddress, config.apiKey, *qrOutput, os.Stdout)
+	}
+	if *qrOutput != "" {
+		return errors.New("-qr-output requires -connection-qr")
 	}
 	config, err := loadConfigFile(*configPath, explicitPath, os.LookupEnv)
 	if err != nil {
@@ -827,6 +885,7 @@ func run() error {
 		return err
 	}
 	defer store.close()
+	store.publicOrigin = config.publicOrigin
 	server := &http.Server{Addr: config.listenAddress, Handler: newHandler(config.apiKey, store), ReadHeaderTimeout: 5 * time.Second, IdleTimeout: 60 * time.Second}
 	log.Printf("sprout server listening on %s", config.listenAddress)
 	return fmt.Errorf("serve HTTP: %w", server.ListenAndServe())

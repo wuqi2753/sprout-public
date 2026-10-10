@@ -73,6 +73,13 @@
             ]
           }
         }
+      ],
+      [
+        "expo-camera",
+        {
+          "cameraPermission": "允许 Sprout 使用相机，扫描配对和 CLI 登录二维码。",
+          "recordAudioAndroid": false
+        }
       ]
     ],
     "experiments": {

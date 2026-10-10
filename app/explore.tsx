@@ -16,7 +16,7 @@ import { Pressable } from '@/components/haptic-pressable';
 import { MemoSyncStatus } from '@/components/memo-sync-status';
 import { MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { useServerConnectionStatus } from '@/hooks/use-server-connection';
+import { useServerConnection } from '@/hooks/use-server-connection';
 import { ThemedText } from '@/components/themed-text';
 
 type ExploreMemo = {
@@ -93,7 +93,7 @@ function formatMemoDate(memo: ExploreMemo) {
 export default function ExploreScreen() {
   const router = useRouter();
   const theme = useTheme();
-  const connectionStatus = useServerConnectionStatus();
+  const { connectionStatus, serverUrl, retryConnection } = useServerConnection();
   const { width } = useWindowDimensions();
   const isWide = width >= 860;
   const [filterOpen, setFilterOpen] = useState(isWide);
@@ -159,6 +159,8 @@ export default function ExploreScreen() {
       activeDay={activeDay}
       activeTag={activeTag}
       connectionStatus={connectionStatus}
+                serverUrl={serverUrl}
+                onRetryConnection={retryConnection}
       month={visibleMonth}
       onAddServer={openServerConnection}
       onChangeMonth={changeMonth}

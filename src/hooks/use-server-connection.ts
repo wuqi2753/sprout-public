@@ -1,21 +1,29 @@
 import { useFocusEffect } from 'expo-router';
-import { useCallback, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 
 import { probeServerConnection } from '@/api/server-connection';
 import type { ServerConnectionStatus } from '@/components/explore-filter-panel';
 import { getServerConnectionConfig } from '@/storage/server-connection';
 
-export function useServerConnectionStatus() {
+export function useServerConnection() {
+  const [serverUrl, setServerUrl] = useState<string>();
+  const [refreshVersion, setRefreshVersion] = useState(0);
+  const [focused, setFocused] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<ServerConnectionStatus>('unconfigured');
 
-  useFocusEffect(
-    useCallback(() => {
+  useFocusEffect(useCallback(() => {
+    setFocused(true);
+    return () => setFocused(false);
+  }, []));
+  useEffect(() => {
+      if (!focused) return;
       let active = true;
 
       async function refreshConnectionStatus() {
         try {
           const config = await getServerConnectionConfig();
           if (!active) return;
+          setServerUrl(config?.serverApiUrl);
           if (!config) {
             setConnectionStatus('unconfigured');
             return;
@@ -32,8 +40,9 @@ export function useServerConnectionStatus() {
       return () => {
         active = false;
       };
-    }, []),
-  );
+    }, [focused, refreshVersion]);
 
-  return connectionStatus;
+  return { connectionStatus, serverUrl, retryConnection: () => setRefreshVersion((version) => version + 1) };
 }
+
+export function useServerConnectionStatus() { return useServerConnection().connectionStatus; }

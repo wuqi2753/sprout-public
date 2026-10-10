@@ -7,7 +7,6 @@ import {
   ActivityIndicator,
   KeyboardAvoidingView,
   Platform,
-  ScrollView,
   StyleSheet,
   TextInput,
   View,
@@ -23,6 +22,7 @@ import {
   normalizeServerApiUrl,
   probeServerConnection,
   ServerConnectionError,
+  type ServerConnectionConfig,
 } from '@/api/server-connection';
 import {
   getServerConnectionConfig,
@@ -30,48 +30,51 @@ import {
 } from '@/storage/server-connection';
 
 type ConnectionFeedback = { title: string; message?: string; afterDismiss?: () => void };
+class ConnectionSetupError extends Error {}
 
 // REQ-016: docs/stories/v0.2.0/REQ-016-server-connection-form.md
-export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?: () => void; onDismiss?: () => void }) {
+export function ServerConnectionForm({ onConnected, onDismiss, initialConnection }: { onConnected?: () => void; onDismiss?: () => void; initialConnection?: ServerConnectionConfig }) {
   const router = useRouter();
   const theme = useTheme();
-  const scrollViewRef = useRef<ScrollView>(null);
-  const apiKeyFocused = useRef(false);
-  const [serverApiUrl, setServerApiUrl] = useState('');
-  const [apiKey, setApiKey] = useState('');
+  const [keyboardVisible, setKeyboardVisible] = useState(false);
+  const connectionPending = useRef(false);
+  const connectionSession = useRef(0);
+  const [serverApiUrl, setServerApiUrl] = useState(initialConnection?.serverApiUrl ?? '');
+  const [apiKey, setApiKey] = useState(initialConnection?.apiKey ?? '');
+  const savedConnection = useRef<ServerConnectionConfig | undefined>(undefined);
+  const [replacement, setReplacement] = useState<ServerConnectionConfig>();
   const [connecting, setConnecting] = useState(false);
   const [saving, setSaving] = useState(false);
   const [feedback, setFeedback] = useState<ConnectionFeedback>();
   const formComplete = serverApiUrl.trim().length > 0 && apiKey.trim().length > 0 && !connecting && !saving;
 
   useEffect(() => {
-    const keyboardListener = Keyboard.addListener(
+    const keyboardShowListener = Keyboard.addListener(
       Platform.OS === 'ios' ? 'keyboardWillShow' : 'keyboardDidShow',
-      () => {
-        if (apiKeyFocused.current) {
-          scrollViewRef.current?.scrollToEnd({ animated: true });
-        }
-      },
+      () => setKeyboardVisible(true),
     );
-    return () => keyboardListener.remove();
+    const keyboardHideListener = Keyboard.addListener(Platform.OS === 'ios' ? 'keyboardWillHide' : 'keyboardDidHide', () => setKeyboardVisible(false));
+    return () => { keyboardShowListener.remove(); keyboardHideListener.remove(); };
   }, []);
 
   useFocusEffect(
     useCallback(() => {
+      const session = ++connectionSession.current;
       let active = true;
       getServerConnectionConfig()
         .then((config) => {
           if (!active || !config) return;
-          setServerApiUrl(config.serverApiUrl);
-          setApiKey(config.apiKey);
+          savedConnection.current = config;
+          if (!initialConnection) { setServerApiUrl(config.serverApiUrl); setApiKey(config.apiKey); }
         })
         .catch(() => {
           if (active) showError('无法读取已保存的 Server 配置。');
         });
       return () => {
         active = false;
+        if (connectionSession.current === session) connectionSession.current++;
       };
-    }, []),
+    }, [initialConnection]),
   );
 
   function showError(message: string) {
@@ -84,15 +87,18 @@ export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?:
     afterDismiss?.();
   }
 
-  async function verifyConnection() {
+  async function verifyConnection(scannedConfig?: ServerConnectionConfig) {
     setConnecting(true);
     try {
-      const normalizedServerApiUrl = normalizeServerApiUrl(serverApiUrl);
-      await probeServerConnection({ serverApiUrl: normalizedServerApiUrl, apiKey });
+      const normalizedServerApiUrl = normalizeServerApiUrl(scannedConfig?.serverApiUrl ?? serverApiUrl);
+      const connectionKey = (scannedConfig?.apiKey ?? apiKey).trim();
+      await probeServerConnection({ serverApiUrl: normalizedServerApiUrl, apiKey: connectionKey });
       setServerApiUrl(normalizedServerApiUrl);
-      return { serverApiUrl: normalizedServerApiUrl, apiKey: apiKey.trim() };
+      return { serverApiUrl: normalizedServerApiUrl, apiKey: connectionKey };
     } catch (error) {
-      showError(error instanceof ServerConnectionError ? error.message : '连接 Server 时发生未知错误。');
+      const message = error instanceof ServerConnectionError ? error.message : '连接 Server 时发生未知错误。';
+      if (scannedConfig) throw error instanceof ServerConnectionError ? error : new ConnectionSetupError(message);
+      showError(message);
       return undefined;
     } finally {
       setConnecting(false);
@@ -104,24 +110,58 @@ export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?:
     setFeedback({ title: '已成功连接' });
   }
 
-  async function saveConnection() {
+  function requestConnection() {
+    if (connectionPending.current || connecting || saving) return;
+    const previous = savedConnection.current;
+    if (previous && (previous.serverApiUrl !== serverApiUrl.trim() || previous.apiKey !== apiKey.trim())) {
+      setReplacement({ serverApiUrl: serverApiUrl.trim(), apiKey: apiKey.trim() });
+      return;
+    }
+    void saveConnection();
+  }
+
+  async function confirmReplacement() {
+    if (!replacement) return;
+    const config = replacement;
+    setReplacement(undefined);
+    try { await saveConnection(config); }
+    catch (error) { showError(error instanceof Error ? error.message : '无法连接 Server，请重试。'); }
+  }
+
+  // REQ-074: scanned and manually entered credentials use the same save path.
+  async function saveConnection(scannedConfig?: ServerConnectionConfig) {
+    if (connectionPending.current || connecting) {
+      if (scannedConfig) throw new ConnectionSetupError('正在连接，请稍候。');
+      return;
+    }
+    connectionPending.current = true;
+    const session = connectionSession.current;
     setSaving(true);
     try {
-      const verifiedConfig = await verifyConnection();
+      if (scannedConfig) {
+        setServerApiUrl(scannedConfig.serverApiUrl);
+        setApiKey(scannedConfig.apiKey);
+      }
+      const verifiedConfig = await verifyConnection(scannedConfig);
       if (!verifiedConfig) return;
+      if (connectionSession.current !== session) throw new ConnectionSetupError('连接页面已关闭，请重新连接。');
       await saveServerConnectionConfig(verifiedConfig);
       try {
         await initializeWelcomeMemo();
       } catch {
+        if (scannedConfig) throw new ConnectionSetupError('无法创建欢迎笔记，请关闭扫码后重试连接。');
         showError('无法创建欢迎笔记，请再次点击连接服务器重试。');
         return;
       }
+      if (connectionSession.current !== session) return;
       Keyboard.dismiss();
       if (onConnected) onConnected();
       else router.replace('/');
-    } catch {
+    } catch (error) {
+      if (scannedConfig) throw new Error(error instanceof ServerConnectionError || error instanceof ConnectionSetupError ? error.message : '无法安全保存 Server 配置，请重试。');
       showError('无法安全保存 Server 配置。');
     } finally {
+      connectionPending.current = false;
       setSaving(false);
     }
   }
@@ -146,26 +186,25 @@ export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?:
           </Pressable>}
         </View>
 
-        <ScrollView
-          ref={scrollViewRef}
-          contentContainerStyle={styles.scrollContent}
-          keyboardDismissMode="none"
-          keyboardShouldPersistTaps="handled">
-          <View style={styles.contentColumn}>
-            <View style={styles.intro}>
-              <ThemedText style={styles.title}>
-                嗨，<ThemedText style={[styles.title, { color: theme.accent }]}>开始记录</ThemedText>
+        <View style={[styles.pageContent, styles.manualPageContent, keyboardVisible && styles.keyboardContent]}>
+          <View style={[styles.contentColumn, styles.manualColumn]}>
+            {!keyboardVisible && <View style={[styles.intro, styles.compactIntro, styles.manualIntro]}>
+              <ThemedText style={styles.manualTitle}>
+                嗨，<ThemedText style={[styles.manualTitle, { color: theme.accent }]}>开始记录</ThemedText>
               </ThemedText>
-              <ThemedText style={styles.description} themeColor="textSecondary">
-                记下一闪而过的想法{'\n'}保存在你自己的服务器
+              <ThemedText style={[styles.description, styles.manualDescription]} themeColor="textSecondary">
+                连接你自己的 Server{'\n'}让想法保存在自己手中
               </ThemedText>
-            </View>
+            </View>}
 
+            <View>
+            {<>
             <View style={styles.formCard}>
               <View style={styles.fieldGroup}>
                 <ThemedText style={styles.fieldLabel}>服务器 API 地址</ThemedText>
                 <TextInput
                   accessibilityLabel="服务器 API 地址"
+                  editable={!connecting && !saving}
                   autoCapitalize="none"
                   autoCorrect={false}
                   keyboardType="url"
@@ -185,11 +224,10 @@ export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?:
                 <ThemedText style={styles.fieldLabel}>API Key</ThemedText>
                 <TextInput
                   accessibilityLabel="API Key"
+                  editable={!connecting && !saving}
                   autoCapitalize="none"
                   autoCorrect={false}
-                  onBlur={() => { apiKeyFocused.current = false; }}
                   onChangeText={setApiKey}
-                  onFocus={() => { apiKeyFocused.current = true; }}
                   placeholder="输入 API Key"
                   placeholderTextColor={theme.connectionPlaceholder}
                   secureTextEntry
@@ -209,7 +247,7 @@ export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?:
                 accessibilityRole="button"
                 accessibilityState={{ disabled: !formComplete, busy: connecting || saving }}
                 disabled={!formComplete}
-                onPress={saveConnection}
+                onPress={requestConnection}
                 style={({ pressed }) => [
                   styles.primaryButton,
                   { backgroundColor: theme.accent, opacity: formComplete ? 1 : 0.5 },
@@ -233,9 +271,13 @@ export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?:
               </Pressable>
             </View>
 
+            </>}
+            </View>
           </View>
-        </ScrollView>
+        </View>
       </KeyboardAvoidingView>
+
+      <FeedbackDialog visible={replacement !== undefined} title="更换服务器？" message={replacement ? `将连接到 ${replacement.serverApiUrl}。验证成功后保存新连接，现有本地笔记保留。` : undefined} onDismiss={() => setReplacement(undefined)} destructiveAction={{ label: '确认连接', onPress: () => { void confirmReplacement(); } }} />
       <FeedbackDialog
         message={feedback?.message}
         onDismiss={dismissFeedback}
@@ -248,13 +290,23 @@ export function ServerConnectionForm({ onConnected, onDismiss }: { onConnected?:
 
 const styles = StyleSheet.create({
   screen: { flex: 1 },
-  header: { paddingHorizontal: 12, paddingTop: 4 },
+  header: { paddingHorizontal: 16, paddingTop: 4, minHeight: 52 },
   iconButton: { width: 48, height: 48, alignItems: 'center', justifyContent: 'center' },
-  scrollContent: { flexGrow: 1, alignItems: 'center', paddingHorizontal: 24, paddingBottom: 32 },
-  contentColumn: { width: '100%', maxWidth: 420 },
-  intro: { paddingTop: 32, paddingBottom: 40 },
-  title: { fontSize: 32, lineHeight: 44, fontWeight: '400' },
-  description: { marginTop: 24, fontSize: 16, lineHeight: 28, fontWeight: '400' },
+  pageContent: { flex: 1, justifyContent: 'center', alignItems: 'center', paddingHorizontal: 32, paddingBottom: 88 },
+  keyboardContent: { paddingBottom: 8 },
+  manualPageContent: { justifyContent: 'flex-start', paddingHorizontal: 24, paddingBottom: 32 },
+  manualColumn: { maxWidth: 420 },
+  manualIntro: { paddingTop: 32, paddingBottom: 40 },
+  manualTitle: { fontSize: 32, lineHeight: 44, fontWeight: '400' },
+  manualDescription: { marginTop: 24, fontSize: 16, lineHeight: 28, fontWeight: '400', opacity: 1 },
+  contentColumn: { width: '100%', maxWidth: 340 },
+  intro: { paddingBottom: 36 },
+  compactIntro: { paddingBottom: 20 },
+  title: { fontSize: 26, lineHeight: 36, fontWeight: '500', letterSpacing: -0.3 },
+  description: { marginTop: 12, fontSize: 14, lineHeight: 24, fontWeight: '400', opacity: 0.8 },
+  scanHint: { marginBottom: 12, fontSize: 12, lineHeight: 18, fontWeight: '400', opacity: 0.7 },
+  manualButton: { minHeight: 44, marginTop: 8, marginBottom: 8, flexDirection: 'row', gap: 6, alignItems: 'center', justifyContent: 'center' },
+  manualLabel: { fontSize: 13, lineHeight: 20, fontWeight: '400' },
   formCard: { gap: 20 },
   fieldGroup: { gap: 8 },
   fieldLabel: { fontSize: 13, lineHeight: 20, fontWeight: '400' },

@@ -37,7 +37,7 @@ import { MemoSyncStatus } from '@/components/memo-sync-status';
 import { ThemedText } from '@/components/themed-text';
 import { Colors, MaxContentWidth, Spacing } from '@/constants/theme';
 import { useTheme } from '@/hooks/use-theme';
-import { useServerConnectionStatus } from '@/hooks/use-server-connection';
+import { useServerConnection } from '@/hooks/use-server-connection';
 import { findTagDraft, formatMemoTime } from '@/memos';
 import { addMemo, deleteMemo, getMemos, initializeWelcomeMemo, renameMemoFile, restoreMemo, setMemoHidden } from '@/storage/memos';
 import type { Memo } from '@/types/memo';
@@ -219,7 +219,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
   const [captureEntryHeight, setCaptureEntryHeight] = useState(48);
   const theme = useTheme();
   const router = useRouter();
-  const connectionStatus = useServerConnectionStatus();
+  const { connectionStatus, serverUrl, retryConnection } = useServerConnection();
   const { height: windowHeight, width: windowWidth, fontScale } = useWindowDimensions();
   // REQ-058: docs/stories/v0.2.0/REQ-058-horizontal-memo-actions.md
   const memoMenuWidth = Math.min(204 + Math.max(0, fontScale - 1) * 56, 264, windowWidth - insets.left - insets.right - 24);
@@ -889,6 +889,8 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
                 activeDay={activeDay}
                 activeTag={activeTag}
                 connectionStatus={connectionStatus}
+                serverUrl={serverUrl}
+                onRetryConnection={retryConnection}
                 month={visibleMonth}
                 onAddServer={openServerConnection}
                 onChangeMonth={changeMonth}

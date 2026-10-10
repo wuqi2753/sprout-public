@@ -38,7 +38,7 @@ func loadConfigFile(path string, required bool, lookupEnvironment func(string) (
 		}
 		name = strings.TrimSpace(name)
 		switch name {
-		case "SPROUT_API_KEY", "SPROUT_LISTEN_ADDRESS", "SPROUT_DATABASE_PATH":
+		case "SPROUT_API_KEY", "SPROUT_LISTEN_ADDRESS", "SPROUT_DATABASE_PATH", "SPROUT_PUBLIC_ORIGIN":
 		default:
 			return serverConfig{}, fmt.Errorf("Server configuration line %d has an unsupported field", lineNumber)
 		}

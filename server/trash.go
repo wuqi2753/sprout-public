@@ -193,7 +193,10 @@ func mustParseTime(value string) time.Time {
 	return parsed
 }
 
-func deleteNoteRecords(ctx context.Context, tx *sql.Tx, id string) error {
+func deleteNoteRecords(ctx context.Context, tx *sql.Tx, id, stamp string) error {
+	if err := appendPhysicalDeletion(ctx, tx, id, stamp); err != nil {
+		return err
+	}
 	for _, table := range []string{"note_images", "note_files"} {
 		if _, err := tx.ExecContext(ctx, `DELETE FROM `+table+` WHERE note_id=?`, id); err != nil {
 			return err
@@ -228,7 +231,7 @@ func handlePurgeNote(w http.ResponseWriter, r *http.Request, store *noteStore, i
 	if !ok {
 		return
 	}
-	code, response, err := store.applyMutation(r.Context(), op, id, "purge", requestFingerprint(r.Method, r.URL.Path, body), func(tx *sql.Tx, _ string) (int, []byte, int64, error) {
+	code, response, err := store.applyMutation(r.Context(), op, id, "purge", requestFingerprint(r.Method, r.URL.Path, body), func(tx *sql.Tx, stamp string) (int, []byte, int64, error) {
 		n, err := getNoteWithQuery(r.Context(), tx, id)
 		if errors.Is(err, sql.ErrNoRows) {
 			return apiErrorResult(404, "note_not_found", "note does not exist")
@@ -239,7 +242,7 @@ func handlePurgeNote(w http.ResponseWriter, r *http.Request, store *noteStore, i
 		if n.Version != input.BaseVersion {
 			return jsonResult(409, versionConflictError{apiErrorBody{"version_conflict", "base_version does not match the current note version"}, n}, 0)
 		}
-		if err := deleteNoteRecords(r.Context(), tx, id); err != nil {
+		if err := deleteNoteRecords(r.Context(), tx, id, stamp); err != nil {
 			return 0, nil, 0, err
 		}
 		return jsonResult(200, n, n.Version)
@@ -259,7 +262,7 @@ func handleClearTrash(w http.ResponseWriter, r *http.Request, store *noteStore) 
 	if !ok {
 		return
 	}
-	code, response, err := store.applyMutation(r.Context(), op, "trash", "clear", requestFingerprint(r.Method, r.URL.Path, body), func(tx *sql.Tx, _ string) (int, []byte, int64, error) {
+	code, response, err := store.applyMutation(r.Context(), op, "trash", "clear", requestFingerprint(r.Method, r.URL.Path, body), func(tx *sql.Tx, stamp string) (int, []byte, int64, error) {
 		rows, err := tx.QueryContext(r.Context(), `SELECT note_id FROM notes WHERE deleted_at IS NOT NULL`)
 		if err != nil {
 			return 0, nil, 0, err
@@ -279,7 +282,7 @@ func handleClearTrash(w http.ResponseWriter, r *http.Request, store *noteStore) 
 			return 0, nil, 0, err
 		}
 		for _, id := range ids {
-			if err := deleteNoteRecords(r.Context(), tx, id); err != nil {
+			if err := deleteNoteRecords(r.Context(), tx, id, stamp); err != nil {
 				return 0, nil, 0, err
 			}
 		}
@@ -328,7 +331,7 @@ func (store *noteStore) purgeExpiredNotes(ctx context.Context) error {
 		return err
 	}
 	for _, id := range ids {
-		if err := deleteNoteRecords(ctx, tx, id); err != nil {
+		if err := deleteNoteRecords(ctx, tx, id, store.now().UTC().Format(time.RFC3339Nano)); err != nil {
 			return err
 		}
 	}

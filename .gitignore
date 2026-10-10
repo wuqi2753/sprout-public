@@ -36,6 +36,8 @@ yarn-error.*
 !.env.example
 !.env.*.example
 /sprout-server
+/sprout-connection-qr.png
+/server/sprout-connection-qr.png
 /.release/
 
 # Local and Server runtime data; new installations create their own empty storage.

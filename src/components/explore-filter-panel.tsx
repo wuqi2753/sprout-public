@@ -1,6 +1,9 @@
+import { ServerConnectionForm } from "@/components/server-connection-form";
+import type { ServerConnectionConfig } from "@/api/server-connection";
+import { ServerQrScanner } from "@/components/server-qr-scanner";
 import { SymbolView } from 'expo-symbols';
 import { useEffect, useState } from 'react';
-import { AccessibilityInfo, ActivityIndicator, Animated, type DimensionValue, Easing, Linking, ScrollView, StyleSheet, View } from 'react-native';
+import { AccessibilityInfo, ActivityIndicator, Animated, type DimensionValue, Easing, Linking, Modal, ScrollView, StyleSheet, View } from 'react-native';
 import Svg, { Circle, Path, Rect } from 'react-native-svg';
 
 import { Pressable } from '@/components/haptic-pressable';
@@ -30,6 +33,8 @@ type ExploreFilterPanelProps = {
   activeDay: number | null;
   activeTag: string | null;
   connectionStatus: ServerConnectionStatus;
+  serverUrl?: string;
+  onRetryConnection?: () => void;
   month: number;
   recordDays: Set<number>;
   tags: TagCount[];
@@ -74,11 +79,13 @@ export function ExploreFilterPanel({
   activeDay,
   activeTag,
   connectionStatus,
+  serverUrl,
   month,
   recordDays,
   tags,
   year,
   onAddServer,
+  onRetryConnection,
   onChangeMonth,
   onSelectDay,
   onSelectTag,
@@ -89,6 +96,8 @@ export function ExploreFilterPanel({
   onOpenTrash,
 }: ExploreFilterPanelProps) {
   const theme = useTheme();
+  const [scannerVisible, setScannerVisible] = useState(false);
+  const [scannedConnection, setScannedConnection] = useState<ServerConnectionConfig>();
   const [linkError, setLinkError] = useState<string>();
   // REQ-059: Custom order affects sidebar presentation only.
   const [tagOrder, setTagOrder] = useState<string[]>([]);
@@ -150,25 +159,25 @@ export function ExploreFilterPanel({
   return (
     <View style={[styles.panel, { width, backgroundColor: theme.surface, borderColor: theme.border }]}>
       <View style={[styles.panelHeader, { borderBottomColor: theme.border }]}>
-        <View
+        <Pressable
           accessibilityLabel={`Server ${connectionStatusPresentation.label}`}
           accessibilityLiveRegion="polite"
-          accessible
+          accessibilityRole="button"
+          onPress={() => onAddServer()}
           style={styles.connectionStatus}>
           <View
             style={[styles.connectionStatusDot, { backgroundColor: connectionStatusPresentation.color }]}
           />
-          <ThemedText style={styles.connectionStatusLabel}>{connectionStatusPresentation.label}</ThemedText>
-        </View>
+          <ThemedText numberOfLines={1} style={[styles.connectionStatusLabel, { flexShrink: 1 }]}>{connectionStatusPresentation.label}</ThemedText>
+        </Pressable>
         <Pressable
-          accessibilityLabel="服务器设置"
+          accessibilityLabel="扫一扫"
           accessibilityRole="button"
           hitSlop={8}
-          onPress={onAddServer}
+          onPress={() => setScannerVisible(true)}
           style={({ pressed }) => [styles.iconButton, pressed && styles.pressed]}>
-          <Svg width={24} height={24} viewBox="0 0 24 24" accessible={false}>
-            <Path d="M7 3.5h10l5 8.5-5 8.5H7L2 12Z" fill="none" stroke={theme.textSecondary} strokeWidth={2} strokeLinejoin="round" />
-            <Circle cx={12} cy={12} r={3} fill="none" stroke={theme.textSecondary} strokeWidth={2} />
+          <Svg width={22} height={22} viewBox="0 0 24 24" accessible={false}>
+            <Path d="M8 3H5a2 2 0 0 0-2 2v3m13-5h3a2 2 0 0 1 2 2v3M3 16v3a2 2 0 0 0 2 2h3m8 0h3a2 2 0 0 0 2-2v-3M7 12h10" fill="none" stroke={theme.textSecondary} strokeWidth={1.8} strokeLinecap="round" strokeLinejoin="round" />
           </Svg>
         </Pressable>
       </View>
@@ -353,6 +362,8 @@ export function ExploreFilterPanel({
         setTagOrder(names);
         setSorting(false);
       }} />}
+      {scannerVisible && <ServerQrScanner onClose={() => setScannerVisible(false)} serverUrl={serverUrl} connected={connectionStatus === "connected"} allowPairing onReadConnection={(config) => { setScannerVisible(false); setScannedConnection(config); }} onServerSettings={() => { setScannerVisible(false); onAddServer(); }} />}
+      {scannedConnection && <Modal visible animationType="slide" onRequestClose={() => setScannedConnection(undefined)}><ServerConnectionForm initialConnection={scannedConnection} onDismiss={() => setScannedConnection(undefined)} onConnected={() => { setScannedConnection(undefined); onRetryConnection?.(); }} /></Modal>}
       <FeedbackDialog visible={linkError !== undefined} title="无法打开链接" message={linkError} onDismiss={() => setLinkError(undefined)} />
     </View>
   );
@@ -373,7 +384,7 @@ const styles = StyleSheet.create({
     alignItems: 'center',
     justifyContent: 'space-between',
   },
-  connectionStatus: { flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
+  connectionStatus: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: Spacing.two },
   connectionStatusDot: { width: 9, height: 9, borderRadius: 5 },
   connectionStatusLabel: { fontSize: 15, lineHeight: 22, fontWeight: '600' },
   iconButton: {

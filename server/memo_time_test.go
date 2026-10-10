@@ -8,7 +8,8 @@ import (
 )
 
 func TestUpdateRecordingTime(t *testing.T) {
-	handler := newHandler("test-key", openTestStore(t))
+	store := openTestStore(t)
+	handler := newHandler("test-key", store)
 	created := performRequest(handler, http.MethodPost, notesPath, fmt.Sprintf(`{"note_id":%q,"content":"original","created_at":"2026-10-02T08:30:00Z"}`, testNoteID), testCreateOpID)
 	if created.Code != 201 {
 		t.Fatal(created.Body.String())
@@ -30,6 +31,8 @@ func TestUpdateRecordingTime(t *testing.T) {
 		t.Fatalf("unexpected note: %+v", note)
 	}
 	replay := performRequest(handler, http.MethodPatch, path, body, testUpdateOpID)
+	// REQ-078: changing only the creation time still records the new version.
+	requireChangeCount(t, store, 2)
 	if replay.Body.String() != updated.Body.String() {
 		t.Fatal("replay changed")
 	}
