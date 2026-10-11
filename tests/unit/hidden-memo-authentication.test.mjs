@@ -219,7 +219,7 @@ function renderEditor(memo, session, draftContent = memo.content, options = {}) 
     '@/components/caret-tag-suggestions': { CaretTagSuggestions: 'TagSuggestions' },
     '@/components/feedback-dialog': { FeedbackDialog: 'FeedbackDialog' },
     '@/components/file-type-icon': { FileTypeIcon: 'FileTypeIcon' },
-    'react-native': { Alert: { alert: (...args) => alerts.push(args) }, Keyboard: { dismiss() {}, addListener: () => ({ remove() {} }) }, Platform: { OS: 'android' }, StyleSheet: { create: (styles) => styles }, TextInput: 'Input', View: 'View', KeyboardAvoidingView: 'KeyboardView' },
+    'react-native': { Alert: { alert: (...args) => alerts.push(args) }, Keyboard: { dismiss() {}, addListener: () => ({ remove() {} }) }, Platform: { OS: 'android' }, StyleSheet: { create: (styles) => styles }, TextInput: 'Input', View: 'View', KeyboardAvoidingView: 'KeyboardView', useWindowDimensions: () => ({ fontScale: 1 }) },
     'react-native-safe-area-context': { SafeAreaView: 'SafeArea', useSafeAreaInsets: () => ({ top: 24, bottom: 16, left: 0, right: 0 }) },
     '@/components/haptic-pressable': { Pressable: 'Button' },
     '@/components/themed-text': { ThemedText: 'Text' },

@@ -10,7 +10,7 @@ const compiled = ts.transpileModule(readFileSync(new URL('../../src/components/s
 }).outputText;
 
 function mountSidebar(initialOpen) {
-  const slots = [], effects = [], listeners = new Map();
+  const slots = [], effects = [], listeners = new Map(), stateSetters = [];
   let cursor = 0, props = { open: initialOpen, width: 300, gesturesEnabled: true };
   let tree, pan;
   const react = {
@@ -19,7 +19,9 @@ function mountSidebar(initialOpen) {
     useState: (value) => {
       const index = cursor++;
       if (!(index in slots)) slots[index] = value;
-      return [slots[index], (next) => { slots[index] = next; }];
+      const setState = (next) => { slots[index] = next; };
+      stateSetters.push(setState);
+      return [slots[index], setState];
     },
     useEffect: (callback, dependencies) => {
       const index = cursor++;
@@ -90,6 +92,7 @@ function mountSidebar(initialOpen) {
   return {
     render,
     offset: slots[0].current,
+    forceVisibleState(visible) { stateSetters.at(-1)(visible); render(); },
     setOpen(open) { props = { ...props, open }; render(); render(); },
     lifecycle(state) { appState.currentState = state; listeners.get('change')(state); render(); },
     drag() {
@@ -155,6 +158,16 @@ test('REQ-095 stale close completion cannot hide reopened sidebar', () => {
   sidebar.close(); const oldCompletion = sidebar.offset.animation.callback;
   sidebar.setOpen(true); oldCompletion(true); sidebar.render();
   assert.equal(sidebar.visible(), true);
+});
+
+test('REQ-095 open sidebar remains interactive when visibility state falls behind', () => {
+  for (const closeMethod of ['close', 'back']) {
+    const sidebar = mountSidebar(true);
+    sidebar.forceVisibleState(false);
+    assert.equal(sidebar.visible(), true);
+    sidebar[closeMethod](); sidebar.finish();
+    assert.equal(sidebar.visible(), false);
+  }
 });
 
 test('REQ-095 left swipe remains available after repeated background cycles', () => {

@@ -2,7 +2,7 @@ import { SymbolView } from 'expo-symbols';
 import { Stack, useLocalSearchParams, useNavigation, useRouter } from 'expo-router';
 import { cloneElement, useEffect, useMemo, useRef, useState } from 'react';
 import { useMentions, type PatternsConfig } from 'react-native-controlled-mentions';
-import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, TextInput, View } from 'react-native';
+import { Keyboard, KeyboardAvoidingView, Platform, ScrollView, StyleSheet, TextInput, useWindowDimensions, View } from 'react-native';
 import { Image } from 'expo-image';
 import * as Clipboard from 'expo-clipboard';
 import { FileTypeIcon } from '@/components/file-type-icon';
@@ -39,6 +39,9 @@ function formatSavedAt(date: Date) {
 
 export default function EditMemoScreen() {
   const theme = useTheme();
+  const { fontScale } = useWindowDimensions();
+  // REQ-010: match homepage text while retaining the fixed 3dp interline spacing.
+  const editorTypography = { ...styles.inputMeasurement, lineHeight: 21 + 3 / fontScale };
   const router = useRouter();
   const navigation = useNavigation();
   const { id } = useLocalSearchParams<{ id: string }>();
@@ -334,11 +337,11 @@ export default function EditMemoScreen() {
           cursorColor={theme.textSecondary}
           scrollEnabled={false}
           // REQ-047: native intrinsic sizing avoids a contentSize -> height layout feedback loop.
-          style={[styles.input, styles.inputMeasurement, { color: theme.text }]}
+          style={[styles.input, editorTypography, { color: theme.text }]}
           textAlignVertical="top"
         >
           {/* REQ-047: Android nested Text does not inherit TextInput font metrics. */}
-          {cloneElement(editorTextInputProps.children, { style: [styles.inputMeasurement, { color: theme.text }] })}
+          {cloneElement(editorTextInputProps.children, { style: [editorTypography, { color: theme.text }] })}
         </TextInput>
         {/* REQ-047: draft attachments are editable; the file body stays untouched. */}
         {imageUris.length > 0 && <View style={styles.images}>
@@ -379,7 +382,7 @@ export default function EditMemoScreen() {
         {suggestedTags.length > 0 && keyboardVisible && <CaretTagSuggestions content={content} cursor={selection.start}
           tags={suggestedTags} onSelect={selectSuggestedTag} inputRef={inputRef} viewportRef={editorBodyRef}
           layoutKey={`${editorWidth}:${inputHeight}:${editorAvailableHeight}:${editorScrollOffset}`}
-          textStyle={styles.inputMeasurement} />}
+          textStyle={editorTypography} />}
         </View>
         <MemoEditorToolbar disabled={!memo || saving || choosingAttachment} imageCount={imageUris.length}
           fileCount={fileAttachments.length} onTag={insertTag} onImage={chooseImages} onFile={chooseFile} />
@@ -421,7 +424,7 @@ const styles = StyleSheet.create({
   editorContent: { flex: 1 },
   editorBody: { flex: 1, minHeight: 0 },
   editorContentContainer: { paddingHorizontal: Spacing.three, paddingTop: Spacing.three, paddingBottom: 12 },
-  inputMeasurement: { fontSize: 17, lineHeight: 26, fontWeight: '400', includeFontPadding: false },
+  inputMeasurement: { fontSize: 14, lineHeight: 24, fontWeight: '400', includeFontPadding: false },
   input: { minHeight: 52, padding: 0 },
   fileRow: { flexDirection: 'row', alignItems: 'center', gap: 12, marginTop: 12, paddingVertical: 8, paddingLeft: 12, paddingRight: 4, borderWidth: StyleSheet.hairlineWidth, borderRadius: 16 },
   fileIcon: { width: 40, height: 44, borderRadius: 10, alignItems: 'center', justifyContent: 'center' },

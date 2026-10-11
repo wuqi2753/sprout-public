@@ -68,8 +68,8 @@ test('REQ-010 retains rounded inline tags with measured width without duplicatin
   assert.equal(tag.props.style[1].width, 46);
   assert.equal(tag.props.style[1].height, 17);
   assert.equal(tag.props.style[1].transform[0].translateY, 2.5);
-  assert.equal(tree.props.children[1].props.style[1].lineHeight, 27);
-  assert.equal(tree.props.children[1].props.style[0].fontSize, 16);
+  assert.equal(tree.props.children[1].props.style[1].lineHeight, 24);
+  assert.equal(tree.props.children[1].props.style[0].fontSize, 14);
   assert.equal(tree.props.children[1].props.style[0].fontWeight, '400');
   assert.equal(textContent(tree), props.content);
 });
@@ -80,7 +80,7 @@ test('REQ-010 measures Web overflow without relying on unsupported onTextLayout'
   const props = { content: '1\n2\n3\n4\n5\n6\n7', numberOfLines: 6, onOverflowChange: (value) => overflow.push(value) };
   render(props).props.children[1].props.onLayout({ nativeEvent: { layout: { height: 168 } } });
   assert.equal(overflow.at(-1), true);
-  assert.equal(render(props).props.style.maxHeight, 162);
+  assert.equal(render(props).props.style.maxHeight, 144);
   render(props).props.children[1].props.onLayout({ nativeEvent: { layout: { height: 144 } } });
   assert.equal(overflow.at(-1), false);
 });
@@ -97,7 +97,7 @@ test('REQ-010 clips exactly at the sixth measured line and expands without clipp
   render(props).props.children[1].props.onTextLayout({ nativeEvent: { lines: lines.slice(0, 6) } });
   assert.equal(overflow.at(-1), false);
   dimensions.fontScale = 1.5;
-  assert.equal(render(props).props.style.maxHeight, 234);
+  assert.equal(render(props).props.style.maxHeight, 207);
   dimensions.width = 320;
   render(props).props.children[1].props.onTextLayout({ nativeEvent: { lines: [{ y: 0, height: 36 }] } });
   assert.equal(overflow.at(-1), false);
@@ -114,8 +114,33 @@ test('REQ-010 centers rounded tags using native font metrics and retains the 3dp
   dimensions.fontScale = 1.5;
   tree = render(props);
   tag = tree.props.children[1].props.children.find((segment) => typeof segment === 'object');
-  assert.equal(tree.props.children[1].props.style[1].lineHeight * dimensions.fontScale, 39);
+  assert.equal(tree.props.children[1].props.style[1].lineHeight * dimensions.fontScale, 34.5);
   assert.equal(tag.props.style[1].height, 24.5);
   assert.equal(tag.props.style[0].borderRadius, 6);
   assert.equal(textContent(tree), props.content);
+});
+
+test('REQ-010 reserves the last inline tag lower edge inside native text and the six-line clip', () => {
+  for (const fontScale of [1, 1.5, 2]) {
+    const { render, dimensions } = createRenderer();
+    dimensions.fontScale = fontScale;
+    for (const content of ['#标签', '正文 #标签', '1\n2\n3\n4\n5\n#标签\n第七行']) {
+      const props = { content, numberOfLines: 6, onOverflowChange: () => {} };
+      const lineHeight = 21 * fontScale + 3;
+      const lines = Array.from({ length: content.split('\n').length }, (_, i) => ({ y: i * lineHeight, height: lineHeight, capHeight: 11 * fontScale }));
+      render(props).props.children[1].props.onTextLayout({ nativeEvent: { lines } });
+      const tree = render(props);
+      const text = tree.props.children[1];
+      const pill = text.props.children.find((segment) => typeof segment === 'object');
+      const shift = pill.props.style[1].transform[0].translateY;
+      assert.ok(text.props.style[1].paddingBottom >= shift, 'native text must contain the translated tag');
+      if (lines.length > 6) {
+        assert.ok(tree.props.style.maxHeight >= lines[5].y + lines[5].height + shift, 'sixth tag lower edge remains visible');
+        assert.ok(tree.props.style.maxHeight < lines[6].y + lines[6].height, 'seventh line remains folded');
+      }
+      assert.equal(text.props.style[1].lineHeight * fontScale, lineHeight);
+    }
+    const plain = render({ content: '无标签正文', numberOfLines: 6, onOverflowChange: () => {} });
+    assert.equal(plain.props.children[1].props.style[1].paddingBottom, 0);
+  }
 });

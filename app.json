@@ -2,19 +2,19 @@
   "expo": {
     "name": "Sprout",
     "slug": "sprout",
-    "version": "1.5.1",
+    "version": "1.5.2",
     "orientation": "default",
     "icon": "./assets/images/sprout-icon-flame.png",
     "scheme": "nativeinstant",
     "userInterfaceStyle": "automatic",
     "ios": {
       "icon": "./assets/images/sprout-icon-flame.png",
-      "buildNumber": "15",
+      "buildNumber": "16",
       "bundleIdentifier": "com.nativeinstant.app"
     },
     "android": {
       "package": "com.nativeinstant.app",
-      "versionCode": 15,
+      "versionCode": 16,
       "adaptiveIcon": {
         "backgroundColor": "#262624",
         "foregroundImage": "./assets/images/sprout-icon-flame.png"

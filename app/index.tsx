@@ -68,13 +68,16 @@ function MemoContent({ content, numberOfLines, onOverflowChange }: { content: st
   const [measuredPreview, setMeasuredPreview] = useState<{ content: string; width: number; fontScale: number; height: number }>();
   const [tagWidths, setTagWidths] = useState<Record<string, number>>({});
   const [textCapHeight, setTextCapHeight] = useState<{ fontScale: number; height: number }>();
-  const textLineHeight = 24 * fontScale + 3;
+  const textLineHeight = 21 * fontScale + 3;
   const tagHeight = 15 * fontScale + 2;
   const capHeight = textCapHeight?.fontScale === fontScale ? textCapHeight.height : 12 * fontScale;
   const normalizedContent = content.replace(/\r\n?/g, "\n");
   const memoSegments = normalizedContent.split(/(#[^\s#]*)/g);
-  const previewHeight = measuredPreview?.content === content && measuredPreview.width === width && measuredPreview.fontScale === fontScale
-    ? measuredPreview.height : 6 * textLineHeight;
+  const tagBaselineOffset = Math.max(0, (tagHeight - capHeight) / 2);
+  // Inline views move below their baseline box; reserve that space at the text boundary.
+  const tagBottomInset = memoSegments.some((segment) => segment.startsWith('#')) ? tagBaselineOffset : 0;
+  const previewHeight = (measuredPreview?.content === content && measuredPreview.width === width && measuredPreview.fontScale === fontScale
+    ? measuredPreview.height : 6 * textLineHeight) + tagBottomInset;
   const updatePreviewMeasurement = (height: number, overflow: boolean) => {
     setMeasuredPreview((previous) => previous?.content === content && previous.width === width && previous.fontScale === fontScale && previous.height === height
       ? previous : { content, width, fontScale, height });
@@ -93,11 +96,11 @@ function MemoContent({ content, numberOfLines, onOverflowChange }: { content: st
           }}>{tag}</ThemedText>
         ))}
       </View>
-      <ThemedText style={[styles.memoContent, { flexShrink: 0, lineHeight: textLineHeight / fontScale }]} onLayout={(event) => {
+      <ThemedText style={[styles.memoContent, { flexShrink: 0, lineHeight: textLineHeight / fontScale, paddingBottom: tagBottomInset }]} onLayout={(event) => {
         // React Native Web does not emit onTextLayout; its full text height remains measurable.
         if (Platform.OS === 'web') {
           const height = 6 * textLineHeight;
-          updatePreviewMeasurement(height, event.nativeEvent.layout.height > height + 1);
+          updatePreviewMeasurement(height, event.nativeEvent.layout.height > height + tagBottomInset + 1);
         }
       }} onTextLayout={(event) => {
         const lines = event.nativeEvent.lines;
@@ -115,7 +118,7 @@ function MemoContent({ content, numberOfLines, onOverflowChange }: { content: st
             width: (tagWidths[`${fontScale}:${segment}`] ?? segment.length * 12 * fontScale) + 8,
             height: tagHeight,
             // Native inline views sit on the text baseline; center the pill on the glyphs.
-            transform: [{ translateY: (tagHeight - capHeight) / 2 }],
+            transform: [{ translateY: tagBaselineOffset }],
             backgroundColor: theme.memoTagBackground,
           }]}>
             <ThemedText style={[styles.inlineTag, { color: theme.memoTag }]}>{segment}</ThemedText>
@@ -934,7 +937,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
                   accessibilityLabel="打开筛选侧栏"
                   accessibilityRole="button"
                   accessibilityState={{ expanded: filterOpen }}
-                  hitSlop={8}
+                  hitSlop={{ left: 12, right: 12 }}
                   onPress={openFilterPanel}
                   style={({ pressed }) => [styles.sidebarButton, pressed && styles.pressed]}>
                   <Image
@@ -947,7 +950,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
                   accessibilityLabel={syncTitle ?? activeTag ?? (showingHidden ? '隐藏笔记' : 'Sprout')}
                   accessibilityLiveRegion="polite"
                   numberOfLines={1}
-                  style={[styles.wordmark, (syncTitle !== undefined || activeTag !== null) && styles.tagViewTitle]}>
+                  style={[styles.wordmark, (syncTitle !== undefined || activeTag !== null || showingHidden) && styles.tagViewTitle]}>
                   {syncTitle ?? activeTag ?? (showingHidden ? '隐藏笔记' : 'Sprout\u00A0')}
                 </ThemedText>
               </View>
@@ -1426,19 +1429,18 @@ const styles = StyleSheet.create({
   contentColumn: {
     width: '100%',
     maxWidth: MaxContentWidth,
-    paddingHorizontal: Spacing.three,
+    paddingHorizontal: 12,
     boxSizing: 'border-box',
   },
   header: {
-    minHeight: 72,
+    minHeight: 48,
     flexDirection: 'row',
     alignItems: 'center',
     justifyContent: 'space-between',
-    paddingTop: Spacing.two,
   },
-  brandGroup: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
-  sidebarButton: { width: 48, height: 48, borderRadius: 13, alignItems: 'center', justifyContent: 'center' },
-  sidebarIcon: { width: 24, height: 24 },
+  brandGroup: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 3 },
+  sidebarButton: { width: 24, height: 48, borderRadius: 13, alignItems: 'flex-start', justifyContent: 'center' },
+  sidebarIcon: { width: 24, height: 24, transform: [{ translateX: -2 }] },
   headerIcon: { width: 24, height: 24 },
   headerActions: { flexDirection: 'row', alignItems: 'center', gap: Spacing.one },
   wordmark: {
@@ -1499,30 +1501,30 @@ const styles = StyleSheet.create({
     gap: Spacing.two,
   },
   activeFilterText: { flex: 1, fontSize: 13, lineHeight: 18, fontWeight: '600' },
-  memoList: { gap: 12 },
-  memoFile: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, marginTop: 8, padding: 12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12 },
+  memoList: { gap: 10 },
+  memoFile: { flexDirection: 'row', alignItems: 'center', gap: 12, minHeight: 48, marginTop: 4, padding: 12, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12 },
   memoFileName: { flex: 1, minWidth: 0, fontSize: 14, lineHeight: 21 },
   memo: {
     position: 'relative',
     borderWidth: StyleSheet.hairlineWidth,
-    borderRadius: 16,
-    paddingHorizontal: Spacing.three,
-    paddingTop: 12,
-    paddingBottom: 12,
-    gap: 6,
+    borderRadius: 12,
+    paddingHorizontal: 12,
+    paddingTop: 8,
+    paddingBottom: 8,
+    gap: 4,
   },
-  memoHeader: { minHeight: 28, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  memoHeader: { minHeight: 28, marginBottom: -2, flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
   memoMetadata: { flex: 1, minWidth: 0, flexDirection: 'row', alignItems: 'center', gap: 6 },
-  memoMenuButton: { width: 48, height: 48, marginVertical: -8, marginRight: -8, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
+  memoMenuButton: { width: 48, height: 48, marginVertical: -10, marginRight: -8, borderRadius: 12, alignItems: 'center', justifyContent: 'center' },
   memoMenuModal: { flex: 1 },
   memoMenu: { position: 'absolute', flexDirection: 'row', gap: 8, borderWidth: StyleSheet.hairlineWidth, borderRadius: 12, padding: 8, shadowColor: '#000', shadowOpacity: 0.12, shadowRadius: 12, shadowOffset: { width: 0, height: 4 }, elevation: 5 },
   memoMenuItem: { flex: 1, minWidth: 48, minHeight: 56, alignItems: 'center', justifyContent: 'center', gap: 4, paddingVertical: 6, borderRadius: 8 },
   memoMenuLabel: { fontSize: 14, lineHeight: 20, fontWeight: '600', textAlign: 'center' },
   memoTime: { flexShrink: 1, fontSize: 12, lineHeight: 18, fontWeight: '400' },
-  memoContent: { flexShrink: 1, fontSize: 16, lineHeight: 24, fontWeight: '400' },
-  memoImage: { width: 120, height: 180, borderRadius: 6, marginTop: 10, overflow: 'hidden' },
+  memoContent: { flexShrink: 1, fontSize: 14, lineHeight: 21, fontWeight: '400' },
+  memoImage: { width: 120, height: 180, borderRadius: 6, marginTop: 4, overflow: 'hidden' },
   memoImageContent: { width: '100%', height: '100%' },
-  memoImageGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 10 },
+  memoImageGrid: { flexDirection: 'row', flexWrap: 'wrap', gap: 8, marginTop: 4 },
   memoGridImage: { width: 84, height: 84, borderRadius: 6, overflow: 'hidden' },
   imagePreviewScreen: { flex: 1, backgroundColor: '#000000' },
   imagePreviewPage: { height: '100%', alignItems: 'center', justifyContent: 'center' },

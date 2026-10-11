@@ -27,6 +27,7 @@ export function SwipeSidebar({ children, sidebar, open, width, gesturesEnabled, 
   const active = useSharedValue(AppState.currentState === 'active');
   const [foreground, setForeground] = useState(AppState.currentState === 'active');
   const [visible, setVisible] = useState(open);
+  const sidebarInteractive = open || visible;
 
   function hideSidebar() { if (!confirmed.current.open) setVisible(false); }
   function beginDrag() { if (AppState.currentState !== 'active') return; setVisible(true); Keyboard.dismiss(); }
@@ -67,7 +68,7 @@ export function SwipeSidebar({ children, sidebar, open, width, gesturesEnabled, 
   }, [open, width, offset]);
 
   useEffect(() => {
-    if (!visible) return;
+    if (!sidebarInteractive) return;
     const subscription = BackHandler.addEventListener('hardwareBackPress', () => {
       onOpenChange(false);
       offset.set(withSpring(0, spring, (finished) => {
@@ -76,7 +77,7 @@ export function SwipeSidebar({ children, sidebar, open, width, gesturesEnabled, 
       return true;
     });
     return () => subscription.remove();
-  }, [visible, onOpenChange, offset]);
+  }, [sidebarInteractive, onOpenChange, offset]);
 
   // Gesture callbacks run on interaction, not during render; their RN callbacks
   // consult the latest committed props only when scheduled by the UI runtime.
@@ -134,7 +135,7 @@ export function SwipeSidebar({ children, sidebar, open, width, gesturesEnabled, 
     <GestureDetector gesture={pan}>
       <View style={styles.screen}>
         {children}
-        <View style={StyleSheet.absoluteFill} pointerEvents={visible ? 'auto' : 'none'} accessibilityElementsHidden={!visible} importantForAccessibility={visible ? 'auto' : 'no-hide-descendants'}>
+        <View style={StyleSheet.absoluteFill} pointerEvents={sidebarInteractive ? 'auto' : 'none'} accessibilityElementsHidden={!sidebarInteractive} importantForAccessibility={sidebarInteractive ? 'auto' : 'no-hide-descendants'}>
           <Reanimated.View style={[StyleSheet.absoluteFill, styles.scrim, backdropStyle]}>
             <Pressable accessibilityLabel="关闭筛选侧栏" accessibilityRole="button" onPress={closeSidebar} style={styles.screen} />
           </Reanimated.View>
