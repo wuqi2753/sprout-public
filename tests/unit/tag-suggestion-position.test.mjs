@@ -29,6 +29,15 @@ test('REQ-054 flips above the caret near the keyboard and allows a shorter scrol
   assert.ok(compact.top >= 8 && compact.top + compact.height <= 120);
 });
 
+test('REQ-054 shows all three homepage tags above the composer instead of clipping to one row', () => {
+  const popup = position({ caretX: 40, lineTop: 235, lineBottom: 290, width: 360, height: 340, count: 3, forceAbove: true });
+  assert.equal(popup.height, 144);
+  assert.equal(popup.top + popup.height, 227);
+  assert.equal(popup.left, 8);
+  assert.equal(popup.width, 344);
+  assert.ok(popup.top >= 0);
+});
+
 test('REQ-054 hides empty, offscreen or too-short suggestions instead of covering the caret', () => {
   const frame = { caretX: 20, lineTop: 10, lineBottom: 34, width: 375, height: 400, count: 5 };
   assert.equal(position({ ...frame, count: 0 }), undefined);

@@ -6,12 +6,12 @@ import { ThemedText } from '@/components/themed-text';
 import { useTheme } from '@/hooks/use-theme';
 import { positionTagSuggestions } from '@/components/tag-suggestion-position';
 
-type InputFrame = { x: number; y: number; width: number; viewportWidth: number; viewportHeight: number };
+type InputFrame = { x: number; y: number; width: number; viewportWidth: number; viewportHeight: number; aboveAnchor?: number };
 
-export function CaretTagSuggestions({ content, cursor, tags, onSelect, inputRef, viewportRef, layoutKey, textStyle, padding = 0, toolbarInset = 0 }: {
+export function CaretTagSuggestions({ content, cursor, tags, onSelect, inputRef, viewportRef, aboveAnchorRef, layoutKey, textStyle, padding = 0, toolbarInset = 0 }: {
   content: string; cursor: number; tags: string[]; onSelect: (tag: string) => void;
   inputRef: RefObject<TextInput | null>; viewportRef: RefObject<View | null>;
-  layoutKey: string; textStyle: TextStyle; padding?: number; toolbarInset?: number;
+  aboveAnchorRef?: RefObject<View | null>; layoutKey: string; textStyle: TextStyle; padding?: number; toolbarInset?: number;
 }) {
   const theme = useTheme();
   const [frame, setFrame] = useState<InputFrame>();
@@ -25,18 +25,24 @@ export function CaretTagSuggestions({ content, cursor, tags, onSelect, inputRef,
       inputRef.current?.measureInWindow((inputX, inputY, inputWidth) => {
         viewportRef.current?.measureInWindow((viewportX, viewportY, viewportWidth, viewportHeight) => {
           if (!active) return;
-          const next = { x: inputX - viewportX, y: inputY - viewportY, width: inputWidth - padding * 2,
-            viewportWidth, viewportHeight: viewportHeight - toolbarInset };
-          setFrame((previous) => previous && Object.keys(next).every((key) => previous[key as keyof InputFrame] === next[key as keyof InputFrame]) ? previous : next);
+          const updateFrame = (aboveAnchor?: number) => {
+            const next = { x: inputX - viewportX, y: inputY - viewportY, width: inputWidth - padding * 2,
+              viewportWidth, viewportHeight: viewportHeight - toolbarInset, aboveAnchor };
+            setFrame((previous) => previous && Object.keys(next).every((key) => previous[key as keyof InputFrame] === next[key as keyof InputFrame]) ? previous : next);
+          };
+          const aboveAnchor = aboveAnchorRef?.current;
+          if (aboveAnchor) aboveAnchor.measureInWindow((_anchorX, anchorY) => { if (active) updateFrame(anchorY - viewportY); });
+          else updateFrame();
         });
       });
     });
     return () => { active = false; cancelAnimationFrame(animationFrame); };
-  }, [prefix, layoutKey, inputRef, viewportRef, padding, toolbarInset]);
+  }, [prefix, layoutKey, inputRef, viewportRef, aboveAnchorRef, padding, toolbarInset]);
 
   const position = frame && caretLine?.prefix === prefix ? positionTagSuggestions({
-    caretX: frame.x + padding + caretLine.x, lineTop: frame.y + padding + caretLine.top,
+    caretX: frame.x + padding + caretLine.x, lineTop: frame.aboveAnchor ?? frame.y + padding + caretLine.top,
     lineBottom: frame.y + padding + caretLine.bottom, width: frame.viewportWidth, height: frame.viewportHeight, count: tags.length,
+    forceAbove: frame.aboveAnchor !== undefined,
   }) : undefined;
 
   return <>

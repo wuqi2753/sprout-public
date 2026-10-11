@@ -244,6 +244,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
   const memoMenuWidth = Math.min(204 + Math.max(0, fontScale - 1) * 56, 264, windowWidth - insets.left - insets.right - 24);
   const memoMenuHeight = 52 + 40 * fontScale;
   const composerRef = useRef<TextInput>(null);
+  const composerModalRef = useRef<View>(null);
   const composerSheetRef = useRef<View>(null);
   const [composerInputHeight, setComposerInputHeight] = useState(72);
   const [composerScrollOffset, setComposerScrollOffset] = useState(0);
@@ -1113,7 +1114,7 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
         onCancel={() => setSearchFiltersOpen(false)} onApply={(filters) => { setSearchFilters(filters); setSearchFiltersOpen(false); }} />}
 
       {!showingHidden && composerOpen && (
-        <View style={[styles.composerModal, { bottom: keyboardHeight }]}>
+        <View ref={composerModalRef} collapsable={false} style={[styles.composerModal, { bottom: keyboardHeight }]}>
           <BlurView blurTarget={composerBlurTarget} blurMethod="dimezisBlurViewSdk31Plus" intensity={12}
             pointerEvents="none" style={StyleSheet.absoluteFill} tint={theme === Colors.dark ? 'dark' : 'light'} />
           <Pressable accessibilityLabel="关闭记录输入" accessibilityRole="button" onPress={closeComposer} style={styles.composerBackdrop} />
@@ -1162,11 +1163,6 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
               setFileAttachments((files) => files.filter((file) => file.uri !== attachment.uri));
             }} />)}
             </ScrollView>
-            {suggestedTags.length > 0 && <CaretTagSuggestions content={content} cursor={composerSelection.start}
-              tags={suggestedTags.map(({ name }) => name)} onSelect={selectSuggestedTag}
-              inputRef={composerRef} viewportRef={composerSheetRef} padding={2} toolbarInset={72}
-              layoutKey={`${composerWidth}:${composerInputHeight}:${composerScrollOffset}:${keyboardHeight}:${imageUris.length}:${fileAttachments.length}`}
-              textStyle={styles.composerMeasurement} />}
             <View style={styles.composerActions}>
               <View style={styles.composerMediaActions}>
                 <IconButton
@@ -1226,6 +1222,11 @@ function HomeScreen({ openSidebar }: { openSidebar: boolean }) {
               </Pressable>
             </View>
           </View>
+          {suggestedTags.length > 0 && <CaretTagSuggestions content={content} cursor={composerSelection.start}
+            tags={suggestedTags.map(({ name }) => name)} onSelect={selectSuggestedTag}
+            inputRef={composerRef} viewportRef={composerModalRef} aboveAnchorRef={composerSheetRef} padding={2} toolbarInset={72}
+            layoutKey={`${composerWidth}:${composerInputHeight}:${composerScrollOffset}:${keyboardHeight}:${imageUris.length}:${fileAttachments.length}`}
+            textStyle={styles.composerMeasurement} />}
         </View>
       )}
 
